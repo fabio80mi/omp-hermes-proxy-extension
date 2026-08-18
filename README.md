@@ -73,10 +73,6 @@ Switch to a Hermes proxy model inside OMP:
 
 ## Troubleshooting
 
-### Build fails with `Cannot find name 'fs'` / `path` / `process`
-
-`tsconfig.json` uses `"moduleResolution": "Bundler"`, which prevents `@types/node` from being auto-included. Fix by adding `"types": ["node"]` to `compilerOptions`, or changing `moduleResolution` to `"Node"`.
-
 ### Models don't update after changing the proxy config
 
 Reinstall the extension after rebuilding:
