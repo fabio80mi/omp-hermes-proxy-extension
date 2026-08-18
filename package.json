@@ -1,0 +1,21 @@
+{
+  "name": "omp-hermes-proxy-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -p . -w"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.0",
+    "@types/node": "^22.0.0"
+  },
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  }
+}

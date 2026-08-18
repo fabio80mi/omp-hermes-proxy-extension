@@ -1,0 +1,41 @@
+{
+  "autodiscover": false,
+  "models": [
+    {
+      "id": "stepfun/step-3.7-flash:free",
+      "name": "StepFun: Step 3.7 Flash Free",
+      "reasoning": true,
+      "input": ["text", "image", "video"],
+      "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+      "contextWindow": 262144,
+      "maxTokens": 256000
+    },
+    {
+      "id": "poolside/laguna-s-2.1:free",
+      "name": "Poolside: Laguna S 2.1 Free",
+      "reasoning": true,
+      "input": ["text"],
+      "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+      "contextWindow": 262144,
+      "maxTokens": 131072
+    },
+    {
+      "id": "poolside/laguna-xs-2.1:free",
+      "name": "Poolside: Laguna XS 2.1 Free",
+      "reasoning": true,
+      "input": ["text"],
+      "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    {
+      "id": "tencent/hy3:free",
+      "name": "Tencent: Hy3 Free",
+      "reasoning": true,
+      "input": ["text"],
+      "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+      "contextWindow": 262144,
+      "maxTokens": 128000
+    }
+  ]
+}
