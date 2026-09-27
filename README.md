@@ -23,11 +23,25 @@ It listens on `http://localhost:8645/v1`.
 ## Install
 
 ```bash
-omp plugin install /home/ubuntu/projects/omp-hermes-proxy-extension
+omp plugin install git@github.com:fabio80mi/omp-hermes-proxy-extension.git
+```
+
+Then check it registered:
+
+```bash
+omp models hermes-proxy --json
 ```
 
 The extension runs directly from `src/index.ts` — OMP is a Bun binary, so no
 build step is needed. Edit the source and run `/reload`.
+
+To work on a local clone instead:
+
+```bash
+git clone git@github.com:fabio80mi/omp-hermes-proxy-extension.git
+cd omp-hermes-proxy-extension
+omp plugin install .
+```
 
 ## Files
 
