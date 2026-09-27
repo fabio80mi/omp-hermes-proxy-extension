@@ -38,6 +38,8 @@ build step is needed. Edit the source and run `/reload`.
 | `models.discovered.json` | Generated full catalog — git-ignored, never hand-edited |
 | `models.json` | Offline seed — last-resort fallback only |
 | `opencode.hermes.json` | Generated opencode provider block — paste manually |
+| `scripts/eval-models.mjs` | Model smoke-eval — see `EVAL.md` |
+| `EVAL.md` | How to run the eval against any model |
 
 The generated catalog and the seed are kept separate on purpose. If the
 generator overwrote the seed, a proxy outage at boot would leave you with zero
