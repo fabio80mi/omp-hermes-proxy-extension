@@ -37,6 +37,7 @@ build step is needed. Edit the source and run `/reload`.
 | `config.json` | Policy only — hand-edited |
 | `models.discovered.json` | Generated full catalog — git-ignored, never hand-edited |
 | `models.json` | Offline seed — last-resort fallback only |
+| `opencode.hermes.json` | Generated opencode provider block — paste manually |
 
 The generated catalog and the seed are kept separate on purpose. If the
 generator overwrote the seed, a proxy outage at boot would leave you with zero
@@ -116,6 +117,31 @@ should not make a model vanish from your picker.
 - Reasoning levels are mapped from each model's advertised effort vocabulary. A
   model with mandatory reasoning gets `off: null`, which prevents OMP from
   offering a level the endpoint rejects with HTTP 400.
+
+## opencode
+
+Each successful refresh also writes `opencode.hermes.json`, an
+`opencode.jsonc` provider block covering the same models. opencode has no
+discovery mechanism comparable to OMP's, so it has to be pasted in by hand.
+
+Copy the `"hermes"` block from that file into
+`~/.config/opencode/opencode.jsonc`, replacing the existing `"hermes"`
+provider. Do not paste the surrounding wrapper.
+
+The extension never writes to your opencode config.
+
+Field mapping differs from the OMP registration:
+
+| opencode | Source |
+|---|---|
+| `limit.context` | `context_length` |
+| `limit.output` | `top_provider.max_completion_tokens` |
+| `modalities.input` | `text` and `image` only — opencode declares no video/audio/file input modality |
+| `variants.<level>` | one entry per advertised reasoning effort, each setting `reasoningEffort` |
+
+`apiKey` holds the raw token. opencode's `openai-compatible` provider builds
+the `Authorization` header itself, so a `Bearer ` prefix there would be sent
+twice.
 
 ## Troubleshooting
 
