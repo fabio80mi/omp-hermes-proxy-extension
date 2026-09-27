@@ -1,10 +1,14 @@
 # OMP Hermes Proxy Extension
 
-Bridge the local Hermes proxy into Oh My Pi (OMP) so free models from StepFun, Poolside, and Tencent are available directly inside `omp`.
+Registers the local Hermes proxy as an Oh My Pi (OMP) provider so every free model
+the proxy exposes is available inside `omp` via `/model`.
 
 ## What it does
 
-Hermes proxy exposes free models through an OpenAI-compatible API. This extension registers that proxy as an OMP provider, so you can switch to Hermes-backed models with `/model` without leaving OMP.
+At startup the extension fetches the proxy catalog, writes it to disk, and
+registers the filtered subset as the `hermes-proxy` provider. It refreshes
+through OMP's native `refreshModels` hook, so the model list updates without
+restarting OMP.
 
 ## Prerequisite
 
@@ -14,7 +18,7 @@ Start the Hermes proxy first:
 hermes proxy start --provider nous
 ```
 
-It listens on `http://localhost:8645/v1`. If the proxy is not running, the extension falls back to the local `models.json` config.
+It listens on `http://localhost:8645/v1`.
 
 ## Install
 
@@ -22,65 +26,112 @@ It listens on `http://localhost:8645/v1`. If the proxy is not running, the exten
 omp plugin install /home/ubuntu/projects/omp-hermes-proxy-extension
 ```
 
-This links the extension into `~/.omp/plugins/` and auto-loads it from `~/.omp/agent/extensions/`.
+The extension runs directly from `src/index.ts` — OMP is a Bun binary, so no
+build step is needed. Edit the source and run `/reload`.
+
+## Files
+
+| File | Role |
+|---|---|
+| `src/index.ts` | Extension entrypoint: fetch, map, filter, register, probe |
+| `config.json` | Policy only — hand-edited |
+| `models.discovered.json` | Generated full catalog — git-ignored, never hand-edited |
+| `models.json` | Offline seed — last-resort fallback only |
+
+The generated catalog and the seed are kept separate on purpose. If the
+generator overwrote the seed, a proxy outage at boot would leave you with zero
+models instead of yesterday's list.
 
 ## Configuration
 
-Edit `models.json` next to the extension. Two modes are supported:
+All policy lives in `config.json`:
 
-```json
-{
-  "autodiscover": true,
-  "models": [...]
-}
-```
+| Key | Default | Meaning |
+|---|---|---|
+| `baseUrl` | `http://localhost:8645/v1` | Proxy endpoint. Overridable with `HERMES_PROXY_URL` |
+| `apiKey` | `HermesProxyLocal` | Bearer token. Overridable with `HERMES_PROXY_KEY` |
+| `freeOnly` | `true` | Register only zero-cost models |
+| `requireChat` | `true` | Drop embeddings, rerankers, image and audio-only models |
+| `requireTools` | `true` | Drop models that cannot call tools |
+| `requireReasoning` | `false` | Require a reasoning block |
+| `dedupeSnapshotVariants` | `true` | Collapse dated/batch snapshot duplicates |
+| `verifyProbe` | `free` | `free`, `all`, or `off` — reachability check |
+| `fetchTimeoutMs` | `5000` | Catalog fetch timeout |
+| `maxContextWindow` | `2000000` | Clamp on advertised context |
 
-- `autodiscover: true` (default) — queries `http://localhost:8645/v1/models` at startup and registers any model whose id contains `:free`.
-- `autodiscover: false` — uses only the models listed in `models.json`.
+Set `freeOnly: false` to register paid models too. Cost is mapped from the
+proxy's per-token prices, so usage accounting stays accurate.
 
-If the API is unreachable or returns no free models, the extension falls back to `models.json` regardless of the `autodiscover` setting.
+### What counts as free
 
-## Models
+A model is free when **both** prices are zero, or its id contains `:free`.
 
-When autodiscovery is enabled, any free model exposed by the proxy is available. The bundled fallback list includes:
+Both conditions are required. The catalog contains 34 asymmetric entries
+(embeddings and rerankers) priced 0 on completion but non-zero on prompt, so
+testing a single price field with an OR would advertise those as free. Price
+alone is also not enough: some zero-cost models have no `:free` in their id, and
+a name-only filter drops them.
 
-- `hermes-proxy/stepfun/step-3.7-flash:free`
-- `hermes-proxy/poolside/laguna-s-2.1:free`
-- `hermes-proxy/poolside/laguna-xs-2.1:free`
-- `hermes-proxy/tencent/hy3:free`
+## Fallback chain
+
+1. **Proxy** — live fetch; writes the cache on success
+2. **Cache** — `models.discovered.json` from the last successful fetch
+3. **Seed** — `models.json`
+
+The provider is never registered empty, and every fallback is reported by
+`/hermes-status`.
 
 ## Use
-
-Start OMP normally:
 
 ```bash
 omp
 ```
 
-Switch to a Hermes proxy model inside OMP:
-
 ```
-/model hermes-proxy/stepfun/step-3.7-flash:free
+/model hermes-proxy/stealth/space-bunny-alpha
+/hermes-status
+/hermes-refresh
 ```
 
-> `--model hermes-proxy/...` is not supported on the CLI; use `/model` in interactive OMP.
+> `--model hermes-proxy/...` is not supported on the CLI; use `/model` in
+> interactive OMP.
 
-## Implementation
+`omp models refresh` also refreshes this provider.
 
-- `src/index.ts` — extension entrypoint. Loads `models.json`, tries the proxy `/models` endpoint with a 3s timeout, maps free models into OMP's provider schema, and registers `hermes-proxy` with `openai-completions` API.
-- `models.json` — local fallback model definitions used when the proxy is unreachable or `autodiscover` is disabled.
-- `dist/` — compiled output. Note: the current build has a TypeScript configuration issue; see troubleshooting.
+## Verification probe
+
+Catalog presence is not availability. A model can stay listed while the proxy
+answers 404 (retired) or 429 (upstream at capacity). After each successful
+fetch the extension sends a one-token completion per free model and records the
+result in the cache.
+
+Probe results are reported but never used to filter the list — a transient 429
+should not make a model vanish from your picker.
+
+## Notes
+
+- `omp models --json` prints an identical `thinking` array for every model. That
+  column is computed by the OMP binary and ignores `thinkingLevelMap`; the
+  interactive `/thinking` picker uses the registered metadata and is correct.
+- Reasoning levels are mapped from each model's advertised effort vocabulary. A
+  model with mandatory reasoning gets `off: null`, which prevents OMP from
+  offering a level the endpoint rejects with HTTP 400.
 
 ## Troubleshooting
 
-### Models don't update after changing the proxy config
+### Models don't update
 
-Reinstall the extension after rebuilding:
+Run `/hermes-refresh` inside OMP, or `omp models refresh` from the shell.
 
-```bash
-omp plugin install /home/ubuntu/projects/omp-hermes-proxy-extension
+### Check which source is in use
+
 ```
+/hermes-status
+```
+
+Reports the source (`proxy`, `cache`, or `seed`), catalog size, when the cache
+was written, and probe results.
 
 ### Proxy auth or port changed
 
-Update `BASE_URL` and `API_KEY` in `src/index.ts`, rebuild, and reinstall.
+Set `HERMES_PROXY_URL` / `HERMES_PROXY_KEY`, or edit `config.json`.

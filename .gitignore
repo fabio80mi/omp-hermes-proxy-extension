@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.codegraph/
+models.discovered.json
+*.tmp
