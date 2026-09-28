@@ -36,6 +36,7 @@ import {
 import {
 	appendRun,
 	computeStable,
+	prune,
 	readHistory,
 	stableIds,
 	summarise,
@@ -170,6 +171,13 @@ console.log(`\nwrote ${AUDIT_PATH}`);
 // unlucky attempt.
 const historyPath = appendRun(report);
 console.log(`appended run to ${historyPath}`);
+
+// Bounded history: keep the newest KEEP runs, oldest pruned. Logged because it
+// is a deletion.
+const pruned = prune();
+if (pruned.length > 0) {
+	console.log(`pruned ${pruned.length} old run(s) beyond the retention limit: ${pruned.join(", ")}`);
+}
 
 const history = readHistory();
 const stable = computeStable(history);

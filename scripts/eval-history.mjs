@@ -25,7 +25,7 @@
  * returns every model to "no data", so back it up.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { ROOT_DIR } from "../src/providers.mjs";
@@ -35,6 +35,16 @@ export const SUMMARY_PATH = join(ROOT_DIR, "eval-summary.json");
 
 /** How many recent runs the summary considers. */
 export const WINDOW = 3;
+
+/**
+ * How many runs are kept on disk.
+ *
+ * History is evidence, but not unbounded evidence: a run is a few KB and the
+ * per-run detail stops being useful long before the file count becomes a
+ * problem. Ten is comfortably more than the three-run window, so pruning can
+ * never remove a run the current verdict depends on.
+ */
+export const KEEP = 10;
 
 const TIERS = ["A", "B", "C"];
 const CATEGORIES = ["code", "debug", "tools", "spec", "ops"];
@@ -63,6 +73,25 @@ export function appendRun(providerId, run) {
 }
 
 /** Every stored run for a provider, oldest first. Unreadable files are skipped. */
+/**
+ * Keep only the most recent `keep` runs, oldest pruned.
+ *
+ * Pruning is a real deletion, so it is logged rather than silent, and the limit
+ * is asserted to exceed the window. If they ever collided, pruning could remove
+ * a run a live verdict still depends on.
+ */
+export function prune(providerId, { keep = KEEP, window = WINDOW } = {}) {
+	if (keep < window) {
+		throw new Error(`KEEP (${keep}) must be >= WINDOW (${window}); pruning would delete runs the verdict uses`);
+	}
+	const dir = join(EVAL_HISTORY_DIR, providerId);
+	if (!existsSync(dir)) return [];
+	const files = readdirSync(dir).filter((f) => f.endsWith(".json")).sort();
+	const excess = files.slice(0, Math.max(0, files.length - keep));
+	for (const file of excess) rmSync(join(dir, file));
+	return excess;
+}
+
 export function readHistory(providerId) {
 	const dir = join(EVAL_HISTORY_DIR, providerId);
 	if (!existsSync(dir)) return [];
@@ -88,9 +117,15 @@ export function listProviders() {
 /**
  * Reduce the last `window` runs to a per-model verdict.
  *
- * Reports the median, the min/max spread, and per-category medians broken down
- * by complexity, so "scores 80" can be read as "scores 80 consistently" or
- * "scores 60-100 depending on when you look".
+ * The headline number is the **mean** of the recent runs, not the median. With
+ * three samples the median is just the middle value and discards the other two
+ * entirely, which throws away real evidence; the mean uses everything observed.
+ *
+ * Its weakness — an outlier pulls it — is handled by reporting the spread
+ * alongside it rather than by hiding it. The two answers different questions:
+ * the mean says what the model typically scores, the spread says whether that
+ * number is worth acting on. A model averaging 69 with a 23-point spread has
+ * not been measured, it has been sampled.
  */
 export function summarise(runs, { window = WINDOW } = {}) {
 	const recent = runs.slice(-window);
@@ -121,30 +156,34 @@ export function summarise(runs, { window = WINDOW } = {}) {
 			categories[category] = tiers;
 		}
 
-		const med = median(totals);
+		const mean = totals.reduce((a, b) => a + b, 0) / totals.length;
+		const spread = Math.max(...totals) - Math.min(...totals);
 		models.push({
 			model,
 			provider: observations[0].provider ?? null,
 			runs: observations.length,
-			median: Math.round(med),
+			mean: Math.round(mean),
+			median: Math.round(median(totals)),
 			min: Math.min(...totals),
 			max: Math.max(...totals),
-			// Spread is the reason the history exists. A wide spread means the
-			// ranking is not yet trustworthy, whatever the median says.
-			spread: Math.max(...totals) - Math.min(...totals),
+			spread,
+			// How much the mean can be trusted. One run is an anecdote; three
+			// agreeing runs are a measurement.
+			confidence:
+				observations.length < 2 ? "single run — not yet measured" : spread > 15 ? "noisy — ranking unreliable" : "steady",
 			categories,
 		});
 	}
 
-	// Most consistent first among comparable medians: a model that scores 80
-	// every time is more useful than one that alternates 100 and 60.
-	models.sort((a, b) => b.median - a.median || a.spread - b.spread);
+	// Highest mean first, then most consistent. Two models averaging the same
+	// are not equally useful: the one that scores the same every time is.
+	models.sort((a, b) => b.mean - a.mean || a.spread - b.spread);
 
 	return {
 		generatedAt: new Date().toISOString(),
 		rule:
-			`median of the last ${recent.length} eval run(s); spread is max-min over those runs. ` +
-			`A high spread means the ranking is not yet trustworthy.`,
+			`mean of the last ${recent.length} eval run(s); spread is max-min over them. ` +
+			`A single run is an anecdote, and a wide spread means the ranking is not yet trustworthy.`,
 		window: recent.length,
 		runsConsidered: recent.map((r) => r.generatedAt),
 		models,
@@ -160,25 +199,27 @@ const TIER_NAME = { A: "easy", B: "medium", C: "complex" };
 
 export function format(summary) {
 	const lines = [];
+	lines.push(summary.rule);
+	lines.push("");
 	lines.push(
-		`median of last ${summary.window} run(s)   (spread = max-min; high spread = untrustworthy ranking)`,
+		`${"model".padEnd(40)}${"mean".padStart(6)}${"med".padStart(5)}${"low".padStart(5)}${"hi".padStart(5)}` +
+			`${"spread".padStart(8)}  confidence`,
 	);
-	lines.push(`${"model".padEnd(42)}${"med".padStart(5)}${"low".padStart(5)}${"high".padStart(6)}${"spread".padStart(8)}`);
-	lines.push("-".repeat(66));
+	lines.push("-".repeat(88));
 	for (const m of summary.models) {
 		lines.push(
-			`${m.model.slice(0, 41).padEnd(42)}${String(m.median).padStart(5)}${String(m.min).padStart(5)}` +
-				`${String(m.max).padStart(6)}${String(m.spread).padStart(8)}`,
+			`${m.model.slice(0, 39).padEnd(40)}${String(m.mean).padStart(6)}${String(m.median).padStart(5)}` +
+				`${String(m.min).padStart(5)}${String(m.max).padStart(5)}${String(m.spread).padStart(8)}  ${m.confidence}`,
 		);
 	}
+	lines.push("");
+	lines.push("per category, by complexity (A=easy B=medium C=complex):");
 	for (const m of summary.models) {
-		const parts = CATEGORIES.map((c) => {
-			const t = m.categories[c] ?? {};
-			const cell = TIERS.map((tier) => (typeof t[tier] === "number" ? `${tier}${t[tier]}` : `${tier}-`));
-			return `${c}[${cell.join(" ")}]`;
-		});
 		lines.push(`  ${m.model}`);
-		lines.push(`    ${parts.join("  ")}`);
+		lines.push(`    ${CATEGORIES.map((c) => {
+			const t = m.categories[c] ?? {};
+			return `${c}[${TIERS.map((tier) => (typeof t[tier] === "number" ? `${tier}${t[tier]}` : `${tier}-`)).join(" ")}]`;
+		}).join("  ")}`);
 	}
 	return lines.join("\n");
 }

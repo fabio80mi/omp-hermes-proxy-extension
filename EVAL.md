@@ -61,16 +61,29 @@ how a fast, cheap check ends up being treated as a quality judgement.
 Every eval run is appended to `eval-history/<provider>/` automatically. `--json`
 is an ad-hoc export, not the record.
 
-**Why the median, and why the spread matters.** The same model scored 64, 83 and
-60 on three consecutive runs of an identical suite. A single run is therefore
-close to meaningless, and `eval-summary.json` reports the median alongside
-max-min. A model averaging 80 with a 30-point spread is a different tool from
-one averaging 80 with a 2-point spread, and a ranking that ignores the spread
-will confidently put the flaky one first.
+**The headline number is the mean of the last 3 runs**, or the single run if
+there is only one. Mean rather than median because with three samples the median
+is just the middle value and discards the other two observations entirely.
 
-Ranking sorts by median, then by spread, so a model that scores the same every
-time outranks one that alternates. Back up `eval-history/`: losing it returns
-every model to "no data".
+The mean's weakness — one outlier pulls it — is handled by reporting the spread
+(next to it) rather than by hiding it. The two answer different questions: the
+mean says what the model typically scores, the spread says whether that number
+is worth acting on. The same model scored 64, 83 and 60 across three identical
+runs: mean 69, spread 23, flagged `noisy — ranking unreliable`.
+
+```
+model                          mean  med  low   hi  spread  confidence
+upstage/solar-pro4:free          69   64   60   83      23  noisy — ranking unreliable
+```
+
+With a single run the summary says `single run — not yet measured` rather than
+presenting it with the same confidence as three agreeing runs. Ranking sorts by
+mean, then by spread, so among equal scorers the consistent one wins.
+
+**History is bounded at 10 runs per provider.** Older runs are pruned after each
+run, and the pruning is printed. The limit is asserted to exceed the 3-run
+window, so pruning can never delete a run the current verdict depends on.
+Back up `eval-history/`: losing it returns every model to "no data".
 
 ## Design: three complexities per category
 

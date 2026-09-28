@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import {
 	appendRun as appendEvalRun,
 	format as formatEvalSummary,
+	prune as pruneEvalHistory,
 	readHistory as readEvalHistory,
 	summarise as summariseEvals,
 	writeSummary as writeEvalSummary,
@@ -1574,6 +1575,11 @@ const evalRun = {
 };
 const historyPath = appendEvalRun(currentDef.id, evalRun);
 console.log(`appended run to ${historyPath}`);
+
+const prunedEvals = pruneEvalHistory(currentDef.id);
+if (prunedEvals.length > 0) {
+	console.log(`pruned ${prunedEvals.length} old run(s) beyond the retention limit: ${prunedEvals.join(", ")}`);
+}
 
 const summary = summariseEvals(readEvalHistory(currentDef.id));
 writeEvalSummary(summary);

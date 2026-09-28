@@ -19,7 +19,7 @@
  * missing run and a model that stopped being offered look identical otherwise.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { ROOT_DIR } from "../src/providers.mjs";
@@ -32,6 +32,16 @@ export const WINDOW = 3;
 
 /** How many of those runs a model must pass to count as stable. */
 export const NEEDED = 2;
+
+/**
+ * How many runs are kept on disk.
+ *
+ * A run is a few KB and its per-model detail stops being useful well before the
+ * file count matters, so the history is bounded rather than append-forever.
+ * Ten is well above the three-run window, so pruning can never remove a run a
+ * live verdict depends on.
+ */
+export const KEEP = 10;
 
 /**
  * States that count as a pass.
@@ -72,6 +82,24 @@ export function appendRun(report) {
 	}
 	writeFileSync(path, JSON.stringify(report, null, 2));
 	return path;
+}
+
+/**
+ * Keep only the most recent `keep` runs.
+ *
+ * This deletes evidence, so it is logged rather than silent, and the limit is
+ * asserted to exceed the window: pruning below the window could remove a run
+ * that `verified-*` membership currently rests on.
+ */
+export function prune({ keep = KEEP, window = WINDOW } = {}) {
+	if (keep < window) {
+		throw new Error(`KEEP (${keep}) must be >= WINDOW (${window}); pruning would delete runs the verdict uses`);
+	}
+	if (!existsSync(HISTORY_DIR)) return [];
+	const files = readdirSync(HISTORY_DIR).filter((f) => f.endsWith(".json")).sort();
+	const excess = files.slice(0, Math.max(0, files.length - keep));
+	for (const file of excess) rmSync(join(HISTORY_DIR, file));
+	return excess;
 }
 
 /** Every stored run, oldest first. Unreadable files are skipped, not fatal. */

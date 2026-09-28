@@ -131,8 +131,11 @@ Two rules worth knowing:
   everything is `new`, so the picker is sparse until history accumulates. That is
   the rule working, not a failure.
 
-`audit-history/` is git-ignored because it grows without bound. Back it up:
-losing it silently resets stability to "no history".
+History is bounded at 10 runs (`KEEP` in `scripts/audit-history.mjs`). Older
+runs are pruned after each run and the pruning is printed. The limit is asserted
+to exceed the 3-run window, so pruning can never delete a run the current
+verdict depends on. `audit-history/` is git-ignored; back it up, because losing
+it silently resets stability to "no history".
 
 ## Why it probes serially
 
