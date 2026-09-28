@@ -18,7 +18,12 @@
  *   node scripts/audit-models.mjs                     # all enabled providers
  *   node scripts/audit-models.mjs --provider kilo      # one provider
  *   node scripts/audit-models.mjs --no-opencode       # skip opencode export
- *   node scripts/audit-models.mjs --delay 2000        # ms between models
+ *   node scripts/audit-models.mjs --delay 2000        # ms between models, all providers
+ *   node scripts/audit-models.mjs --delay kilo=9000   # ms for one provider only
+ *
+ * Each provider also carries its own `delayMs` in providers.json, which sets
+ * the default: providers rate-limit very differently, and a 429 we caused
+ * ourselves is indistinguishable from a real one.
  */
 
 import { writeFileSync } from "node:fs";
@@ -46,13 +51,31 @@ import {
 const argv = process.argv.slice(2);
 let only = null;
 let writeOpencode = true;
-let delayMs = 1200;
+/**
+ * Fallback pace when neither the CLI nor providers.json says otherwise.
+ * Kept as a named constant because the CLI value must be nullable to tell
+ * "the user passed --delay" from "nobody did" — otherwise providers.json
+ * silently wins over an explicit flag on the command line.
+ */
+const DEFAULT_DELAY_MS = 1200;
+/** Set only by a bare `--delay <ms>`. */
+let globalDelay = null;
 let skipUnkeyed = false;
+/** Per-provider pacing overrides from `--delay <provider>=<ms>`. */
+const delayOverrides = new Map();
 
 for (let i = 0; i < argv.length; i += 1) {
 	if (argv[i] === "--provider") only = argv[++i];
 	else if (argv[i] === "--no-opencode") writeOpencode = false;
-	else if (argv[i] === "--delay") delayMs = Number(argv[++i]);
+	else if (argv[i] === "--delay") {
+		// Accept either a global `--delay 4000` or a per-provider
+		// `--delay kilo=6000`, so pacing can be raised for one rate-limited
+		// upstream without slowing the others.
+		const value = argv[++i];
+		const per = /^([a-z]+)=(\d+)$/.exec(String(value));
+		if (per) delayOverrides.set(per[1], Number(per[2]));
+		else globalDelay = Number(value);
+	}
 	else if (argv[i] === "--include-unkeyed") skipUnkeyed = false;
 	else if (argv[i] === "--help" || argv[i] === "-h") {
 		console.log(
@@ -62,6 +85,7 @@ for (let i = 0; i < argv.length; i += 1) {
 				"  node scripts/audit-models.mjs",
 				"  node scripts/audit-models.mjs --provider kilo",
 				"  node scripts/audit-models.mjs --delay 2000 --no-opencode",
+			"  node scripts/audit-models.mjs --delay kilo=9000   # one provider, louder",
 				"",
 				"Keys are read from .env (git-ignored):",
 				"  HERMES_PROXY_KEY  CLINE_API_KEY  KILO_API_KEY",
@@ -82,13 +106,25 @@ if (providers.length === 0) {
 	process.exit(1);
 }
 
-const report = { generatedAt: new Date().toISOString(), delayMs, providers: [] };
+const report = { generatedAt: new Date().toISOString(), defaultDelayMs: DEFAULT_DELAY_MS, providers: [] };
 
 for (const def of providers) {
+	// providers.json carries each upstream's own pace; a global --delay and an
+	// explicit --delay kilo=... both override it. Providers rate-limit very
+	// differently — at 2.5s Kilo returned 429 for five models in one run while
+	// Hermes and Cline were clean — and a throttle we caused ourselves is
+	// indistinguishable from a real one, so the pace belongs with the provider.
+	// Precedence: --delay <id>=<ms> beats a bare --delay <ms>, which beats
+	// providers.json, which beats the built-in default. An explicit flag must
+	// win over a config file, or `--delay 9000` would do nothing.
+	const pace =
+		delayOverrides.get(def.id) ??
+		globalDelay ??
+		(Number.isFinite(def.delayMs) ? def.delayMs : DEFAULT_DELAY_MS);
 	const key = resolveKey(def);
 	if (!key && skipUnkeyed) continue;
 
-	console.log(`\n=== ${def.label} (${def.id}) ===`);
+	console.log(`\n=== ${def.label} (${def.id}) — ${pace}ms between probes ===`);
 	if (!key) console.log("  no API key configured — probing unauthenticated");
 
 	let catalog;
@@ -118,7 +154,7 @@ for (const def of providers) {
 		const mark =
 			verdict.state === "ok" ? "ok" : verdict.state === "partial" ? "chat" : verdict.state;
 		console.log(` ${mark} ${verdict.status ?? ""} ${verdict.detail}`.trimEnd());
-		await sleep(delayMs);
+		await sleep(pace);
 	}
 
 	// Retry pass. Inconclusive outcomes are not verdicts: a model that was
@@ -137,7 +173,7 @@ for (const def of providers) {
 			console.log(
 				` ${retry.state} ${retry.status ?? ""} ${retry.detail}`.trimEnd(),
 			);
-			await sleep(delayMs * 2);
+			await sleep(pace * 2);
 		}
 	}
 
@@ -154,6 +190,9 @@ for (const def of providers) {
 		label: def.label,
 		baseUrl: def.baseUrl,
 		freeSource: def.freeSource,
+		// Recorded in the evidence, because a throttled model is ambiguous
+		// without knowing how hard we were pushing.
+		delayMs: pace,
 		catalogTotal: catalog.catalogTotal,
 		freeTotal: catalog.models.length,
 		tally,

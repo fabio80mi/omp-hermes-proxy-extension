@@ -79,8 +79,16 @@ is empty.
 ```bash
 node scripts/audit-models.mjs                    # every enabled provider
 node scripts/audit-models.mjs --provider kilo    # one provider
-node scripts/audit-models.mjs --delay 2000       # slower, gentler
+node scripts/audit-models.mjs --delay 2000       # override the pace, all providers
+node scripts/audit-models.mjs --delay kilo=9000  # one provider, louder
 ```
+
+Pacing is per provider, and lives in `providers.json` as `delayMs`, because
+providers rate-limit very differently: at a uniform 2.5s, Kilo returned 429 for
+five models in one run while Hermes and Cline were clean. A throttle we caused
+ourselves is indistinguishable from a real one, so the honest fix is to slow
+down. Precedence is `--delay <id>=<ms>`, then a bare `--delay <ms>`, then
+`providers.json`, then the built-in default.
 
 Probes are serial and spaced out. Parallel probes trigger provider rate limits,
 and a 429 caused by our own concurrency is indistinguishable from a genuinely

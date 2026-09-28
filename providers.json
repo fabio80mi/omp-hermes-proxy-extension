@@ -1,5 +1,5 @@
 {
-  "$comment": "Provider allowlist. One entry per upstream; `enabled: false` skips it. Keys come from .env (git-ignored), never from this file. `headers` carry SDK identity for providers that gate models behind it — omitting them makes working models answer 403. `freeSource` picks how zero-cost models are identified; providers differ and getting this wrong silently invents free models that 402 on first use.",
+  "$comment": "Provider allowlist. One entry per upstream; `enabled: false` skips it. Keys come from .env (git-ignored), never from this file. `headers` carry SDK identity for providers that gate models behind it — omitting them makes working models answer 403. `freeSource` picks how zero-cost models are identified; providers differ and getting this wrong silently invents free models that 402 on first use. `delayMs` is the per-provider pause between probes: providers rate-limit differently, and our own pace is the thing that produces 429s, so a throttle we caused is indistinguishable from a real one.",
   "providers": [
     {
       "id": "hermes",
@@ -9,7 +9,8 @@
       "apiKeyEnv": "HERMES_PROXY_KEY",
       "apiKeyDefault": "Bearer HermesProxyLocal",
       "freeSource": "pricing",
-      "note": "Local proxy. Ignores Authorization, so the default token is inert."
+      "note": "Local proxy. Ignores Authorization, so the default token is inert.",
+      "delayMs": 2000
     },
     {
       "id": "cline",
@@ -25,7 +26,8 @@
         "X-CLIENT-TYPE": "cline-sdk",
         "X-Title": "Cline"
       },
-      "note": "The cline-free/* models return 403 without these four headers. Its /models endpoint carries no pricing, so the recommended-models free list is the only reliable free signal."
+      "note": "The cline-free/* models return 403 without these four headers. Its /models endpoint carries no pricing, so the recommended-models free list is the only reliable free signal.",
+      "delayMs": 3000
     },
     {
       "id": "kilo",
@@ -34,7 +36,8 @@
       "baseUrl": "https://api.kilo.ai/api/gateway",
       "apiKeyEnv": "KILO_API_KEY",
       "freeSource": "pricing",
-      "note": "Use this provider's live pricing, never OMP's cached cost: the cache marks ~200 paid models as free, and they answer 402."
+      "note": "Use this provider's live pricing, never OMP's cached cost: the cache marks ~200 paid models as free, and they answer 402.",
+      "delayMs": 6000
     }
   ]
 }
