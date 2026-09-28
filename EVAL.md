@@ -1,144 +1,145 @@
-# Model smoke-eval
+# Model evaluation
 
-A small, fast, reproducible way to compare models served by the local Hermes
-proxy. Built after hand-testing the eight free models in September 2026.
+Quality evaluation of free models. This is separate from the capability audit.
 
-It is **not** a benchmark suite. It is a regression gate that catches the two
-failure modes that actually showed up in practice:
+The audit (`scripts/audit-models.mjs`) answers "does this model work" — can it
+answer a chat request and emit a tool call. This script answers "is this model
+any good" — can it write correct code, find a bug, chain tools, hold many
+constraints in its head, and judge an operational situation.
 
-1. A model that is advertised in the catalog with zero pricing but is dead or
-   rate limited.
-2. A model that returns nothing when asked to think, after spending its whole
-   token budget.
+A model must pass the audit before it is registered as `verified-*` in OMP. This
+evaluation is not part of registration; it ranks models that already pass.
+
+Replaces the earlier five-test smoke eval, which every competent model scored
+100/100 and which therefore measured nothing.
 
 ## Running it
 
-```bash
-node scripts/eval-models.mjs                          # every free model
-node scripts/eval-models.mjs --model <id> --model <id>  # specific models
-node scripts/eval-models.mjs --all                    # entire catalog, paid included
-node scripts/eval-models.mjs --json results.json      # machine-readable output
-```
-
-The proxy must be running first:
+Always pass a provider. One model costs 15 calls (three per category), so budget
+roughly 2-3 minutes per model.
 
 ```bash
-hermes proxy start --provider nous
+# one model
+node scripts/eval-models.mjs --provider hermes --model upstage/solar-pro4:free
+
+# every model the audit cleared for one provider
+node scripts/eval-models.mjs --provider hermes
+
+# slower pacing
+node scripts/eval-models.mjs --provider kilo --delay 4000
+
+# machine-readable
+node scripts/eval-models.mjs --provider cline --json
 ```
 
-Requires `node` 18+ (uses global `fetch`) and `python3` on `PATH` for the code
-test.
+Providers are `hermes`, `cline`, `kilo`. Credentials come from `.env` in the
+project root (mode 600, git-ignored) or from the process environment.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `HERMES_PROXY_URL` | `http://localhost:8645/v1` | Endpoint to test against |
-| `HERMES_PROXY_KEY` | `HermesProxyLocal` | Bearer token |
-| `EVAL_MAX_TOKENS` | `4000` | Default output budget per call |
-| `EVAL_TIMEOUT_MS` | `280000` | Per-request timeout |
-| `EVAL_PYTHON` | `python3` | Interpreter for the code test |
-
-## Output
-
-```
-model                                       code  reason  IF  tool  triv   score
----------------------------------------------------------------------------------
-stealth/space-bunny-alpha                     25       0   15    20    15       75
-upstage/solar-pro4:free                       -       -    -     -     -      429
-
-returned empty content after using their token budget:
-  stealth/space-bunny-alpha                  reasoning
-
-rate limited (429, capacity, not a quality signal):
-  upstage/solar-pro4:free                    The requested model is temporarily at capacity
-```
-
-Three signals are reported separately and deliberately not folded into the score:
-
-- **DEAD** — HTTP 404. Advertised but not served. Nothing to fix locally.
-- **429** — capacity. Not a quality signal. Re-run later before judging.
-- **empty content** — returned a completion but with no text in it. This is the
-  interesting one; it usually means the model burned its budget thinking.
-
-## The five tests
-
-| Test | Weight | What it asks | How it is scored |
-|---|---|---|---|
-| `code` | 25 | Write `parse_duration(s)` handling `1h30m`, `45s`, `2d`, `1w` | Code is **executed by python3** and called with five inputs. All five must be right. |
-| `reasoning` | 25 | Autoscaling scenario where the honest answer is "impossible" | Passes if the response flags the gap rather than just doing arithmetic. |
-| `instruction` | 15 | Output exactly 3 lines, no extras | Passes only on exactly the right 3 lines. |
-| `tools` | 20 | "What is the weather in Oslo? Use the tool." | Passes on a real `get_weather` call with `city: Oslo`. |
-| `trivial` | 15 | 70.2 vs 59.5, which is higher and by how much | Passes on `10.7`. |
-
-Weights total 100. They are opinionated, not scientific: the code test carries
-the most because executed correctness is the hardest signal to fake.
-
-The reasoning test is a deliberate trap. The arithmetic answer is "1 event" —
-3 replicas at 100 rps is 300 rps, so one more reaches 400. But that replica
-needs 45s to be added plus 20s to become healthy, which cannot happen inside a
-200ms p99 budget. Models that answer "1" without noticing the timing are
-scored as failing.
-
-## Using it on other models
-
-The script takes any model id, so evaluating a newly discovered model needs no
-code changes:
+`--self-test` runs offline, with no network and no model calls. Run it after
+touching any scorer:
 
 ```bash
-# something the catalog just started advertising
-node scripts/eval-models.mjs --model some-vendor/some-model
-
-# a model you are about to pay for, alongside the free ones
-node scripts/eval-models.mjs --all --json compare.json
-
-# a model that is not on the proxy at all, via any OpenAI-compatible endpoint
-HERMES_PROXY_URL=https://api.example.com/v1 \
-HERMES_PROXY_KEY=sk-... \
-  node scripts/eval-models.mjs --model some/model
+node scripts/eval-models.mjs --self-test
 ```
 
-To add a model permanently, refresh the extension first so the model exists in
-the catalog, then re-run without `--model` to include it.
+A full pass over all 24 audited models takes over an hour. That is the one case
+where background execution is reasonable — ask first, and record the PID.
 
-To change what is measured, edit the constants near the top of the script:
-`T_CODE`, `T_REASON`, `T_IF`, `T_TOOL`, `T_TRIV`, and `DURATION_CASES`. Keep the
-tests cheap and mechanical. A test that needs a human to judge does not belong
-in an automated gate — that is a different tool.
+## Design: three complexities per category
 
-## Interpreting results honestly
+Each category asks three questions of increasing difficulty. Each is a
+**separate model call**, and the report prints a column per complexity.
 
-- **Non-determinism is real.** The same model can pass `reasoning` on one run
-  and return empty on the next, because thinking length varies with load and
-  demand. A single run is not a verdict. Re-run before concluding.
-- **429 is not a failure.** It means try later. Scoring it as zero would rank
+| category | A (easy) | B (medium) | C (complex) |
+| --- | --- | --- | --- |
+| `code`   | `best_a(jobs)` — k=1 weighted interval scheduling | `best_b(jobs, k)` — value across k machines | `best_c(jobs, k)` — value **and** a valid machine assignment |
+| `debug`  | off-by-one that drops the last element on odd input | loop starts at index 1, so a duplicate at 0 is missed | unbounded read-through cache, correct-looking, slower than no cache |
+| `tools`  | one tool call | two chained calls, correct ordering | three chained calls, must conclude the order cannot be fulfilled |
+| `spec`   | 3 simultaneous constraints | 6 constraints | 9 conflicting constraints |
+| `ops`    | obvious blocker | unknown data-migration state | no prod access, service will OOM |
+
+Weights: `code` 30, `debug` 20, `tools` 20, `spec` 15, `ops` 15.
+
+### Why separate calls rather than three questions in one call
+
+Both were tried. Three questions in one call cost a single round trip but made
+one bad generation take all three down together — the same model scored `code`
+100, 33 and 0 on three consecutive runs. A zero then meant two different things:
+"cannot do this" and "unlucky sample". Separate calls cost 3× the round trips
+and every score belongs to exactly one complexity, so a zero is just a zero.
+
+### Why three complexities
+
+With one difficulty per category a model can only score 0 or full marks. Solar
+Pro 4 solved the easy scheduling case perfectly and the k-machine case not at
+all; under a single hard prompt that reads as "cannot code" when it means "can
+code, but not this". The ladder separates those cases.
+
+## How scoring works
+
+No second model judges the output, and nothing is graded on the whole answer
+alone.
+
+- **code** — the returned Python is executed against fixtures whose expected
+  values were computed by brute force. Every fixture is chosen so the optimum
+  differs from three plausible wrong strategies: top-k by value, sum everything,
+  and greedy in start order. A fixture where those coincide measures nothing.
+  Tier A is called as `best_a(jobs)` and B/C as `f(jobs, k)`, because the
+  prompt specifies those signatures.
+- **debug** — a three-level rubric per snippet: named the cause (partial), named
+  it and its impact (higher), and for the cache bug, proposed a bound. The fix
+  is looked for in the closing sentence only, because scanning the whole answer
+  matched "never evicts" in the problem statement.
+- **tools** — a real agent loop, not one request: the tool result is fed back and
+  the model continues. Each tier is offered only the tools it needs, so "never
+  called `get_inventory`" measures chaining, not a withheld tool.
+- **spec** — each constraint is a predicate, so a model satisfying 5 of 9 scores
+  0.56 and the report names the constraints it missed.
+- **ops** — required facts are regexes. A confident but unexecutable plan scores
+  low; recognising the authority gap scores high.
+
+## Reading the output
+
+```
+model                     code A  code B  code C debug A ...
+  A = easy   B = medium   C = complex
+```
+
+then the per-tier breakdown, which is the actual finding:
+
+```
+  upstage/solar-pro4:free  —  67/100
+    code   easy    100%  2/2
+    code   medium   0%   0/2
+    code   complex  0%   0/4
+    spec   complex  78%  missed exactly 11 words, has 7
+```
+
+"missed exactly 11 words, has 7" is the useful output. A bare 78 is not.
+
+## Fixtures
+
+`SCHED_CASES` is a flat list of `[jobs, k, expected]` triples; `TIER_OF` assigns
+each to a tier. Both are validated at load, because a length mismatch there
+silently scores a correct solution as zero.
+
+Never hand-compute an expected value. Brute-force it and paste the result. A
+hand-computed 150 survived long enough to mark a correct answer wrong when the
+true optimum was 200.
+
+## Honest limits
+
+- **Non-determinism is real.** Thinking length varies with load. A single run
+  is not a verdict on a borderline model.
+- **429 is not a failure.** It means try later; scoring it as zero would rank
   capacity as capability.
-- **Small n.** Five tests, one sample each. A 25-point swing is one test. Treat
-  the total as a coarse filter, not a ranking.
+- **Small n.** One sample per (category, complexity). A 10-point swing in one
+  category is one question. Treat the total as a coarse filter, not a ranking.
 - **These are not frontier benchmarks.** Nothing here substitutes for
-  Terminal-Bench or SWE-bench. Cross-check any decision against vendor numbers,
-  and read those critically too — most are self-reported.
-
-## Result from September 2026
-
-Run against the eight free models at the time, to show what this looks like in
-practice. Several findings were strong enough to act on:
-
-- `meituan/longcat-2.0:free` returned **404** on every request — "this model is
-  no longer free" — while the catalog still listed it at zero price. Its vendor
-  scores were among the best in the set (59.5 SWE-bench Pro, 70.8
-  Terminal-Bench 2.1) and it was completely unusable. Only a live probe finds
-  this.
-- `stepfun/step-3.7-flash:free` was **429** for the whole session.
-- `poolside/laguna-xs-2.1:free` and `inclusionai/ling-3.0-flash-fin:free`
-  returned **empty content** on most prompts, in some cases spending 4000
-  tokens producing nothing. Both answer short prompts correctly and quickly, so
-  a casual test would have passed them.
-- The `empty` flag is the single most useful output here. It surfaced a failure
-  mode that reading vendor leaderboards cannot.
-
-The extension's own startup probe covers the cheap liveness half of this (404
-and 429 detection at registration). This script covers the behaviour half.
+  Terminal-Bench or SWE-bench, and most vendor numbers are self-reported.
 
 ## Related
 
-- `README.md` — extension install, config, and troubleshooting
-- `config.json` — policy: `freeOnly`, probe settings, timeouts
+- `scripts/audit-models.mjs` — capability audit that gates registration
+- `scripts/render-opencode.mjs` — generates the OpenCode provider block
+- `README.md` — plugin install, configuration, troubleshooting
