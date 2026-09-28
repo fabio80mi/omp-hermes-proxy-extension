@@ -104,14 +104,24 @@ const TOOLS_ANSWER = /SHIP=(YES|NO)/i;
 // --- 2. debugging a real defect ---------------------------------------------
 // Off-by-one in a pagination boundary. The function is wrong for even-length
 // input, which is exactly the bug that slips through casual review.
+// A real defect that looks correct and passes a casual read: the cache is
+// unbounded, so a pathological key distribution evicts everything and the
+// "fast path" is slower than the database it fronts. The cause is a missing
+// bound, not a syntax error, and a model that pattern-matches on off-by-one
+// will misdiagnose it.
 const T_DEBUG = [
-	"This Python function is supposed to return the items on even indices (0-based) of a list.",
-	"It works on odd-length lists but is wrong on even-length ones. Explain in one or two sentences",
-	"what is wrong and what the minimal fix is. Do not rewrite unrelated code.",
+	"This function is a read-through cache in front of a Postgres users table. It is correct",
+	"for ordinary traffic but latency has tripled in production and p99 is worse than no cache.",
+	"In one or two sentences, state what is actually wrong. Be specific about the mechanism.",
+	"Do not rewrite the code.",
 	"",
 	"```python",
-	"def even_slice(items):",
-	"    return [items[i] for i in range(0, len(items) - 1, 2)]",
+	"def get_user(conn, cache, user_id):",
+	"    if user_id in cache:",
+	"        return cache[user_id]",
+	"    row = conn.execute('SELECT * FROM users WHERE id = %s', (user_id,)).fetchone()",
+	"    cache[user_id] = row",
+	"    return row",
 	"```",
 ].join("\n");
 
@@ -120,75 +130,115 @@ const T_DEBUG = [
 // known input/output pair. An approximation, brute force, or wrong signature
 // all score zero, and partial credit is proportional to how many cases pass.
 const T_CODE = [
-	"Write a Python function `best_sched(jobs)` that returns the maximum total value of a",
-	"non-overlapping subset of jobs. Each job is a dict with keys 'start', 'end', 'value'.",
-	"Jobs are half-open intervals: a job ending at time t does not conflict with one starting at t.",
-	"Sort and scan is expected; do not brute force. Return only a fenced Python code block.",
+	"Write a Python function `best_sched(jobs, k)` returning the maximum total value of a",
+	"subset of jobs that can be scheduled on `k` parallel machines with no overlap on any",
+	"machine. Each job is a dict with keys 'start', 'end', 'value'. Intervals are half-open:",
+	"a job ending at time t does not conflict with one starting at t.",
+	"Return only a fenced Python code block.",
 ].join(" ");
 
-// Expected values are brute-force verified, not hand-computed. A wrong fixture
-// makes a correct solution look wrong, which is worse than no test.
+// Every expected value below is brute-force verified, and every case is chosen so
+// the optimum differs from THREE plausible wrong strategies: taking the k
+// highest-value jobs, summing everything, and greedily accepting jobs in start
+// order. A case where those coincide measures nothing.
+//
+// Layout is a flat list of triples: [jobs, k, expectedValue], repeated.
+//
+// With k machines this is NP-hard in general, so there is no polynomial answer a
+// model can pattern-match. It has to either reason about the constraint or search.
 const SCHED_CASES = [
-	// 200, not the 150 that taking the single big job gives: 50+60+40 beats it.
 	[
-		{ start: 0, end: 3, value: 50 },
-		{ start: 3, end: 4, value: 20 },
-		{ start: 3, end: 5, value: 60 },
-		{ start: 5, end: 7, value: 40 },
-		{ start: 3, end: 9, value: 150 },
+		{ start: 11, end: 12, value: 10 },
+		{ start: 9, end: 11, value: 80 },
+		{ start: 10, end: 14, value: 60 },
+		{ start: 7, end: 11, value: 60 },
+		{ start: 4, end: 6, value: 30 },
+		{ start: 11, end: 13, value: 20 },
 	],
-	200,
+	1,
+	130, // top-1 is 80, greedy-by-start is 100, sum is 260
 	[
-		{ start: 1, end: 4, value: 10 },
-		{ start: 4, end: 6, value: 20 },
-		{ start: 6, end: 9, value: 30 },
-		{ start: 2, end: 8, value: 25 },
+		{ start: 0, end: 1, value: 100 },
+		{ start: 9, end: 12, value: 60 },
+		{ start: 11, end: 14, value: 80 },
+		{ start: 9, end: 13, value: 20 },
+		{ start: 1, end: 4, value: 80 },
 	],
-	60, // 10+20+30, not the 25 that spans it
+	2,
+	320, // top-2 is 180, greedy is 260, sum is 340
 	[
-		{ start: 0, end: 5, value: 100 },
-		{ start: 0, end: 2, value: 60 },
-		{ start: 2, end: 4, value: 60 },
-		{ start: 4, end: 5, value: 60 },
+		{ start: 12, end: 15, value: 20 },
+		{ start: 12, end: 16, value: 80 },
+		{ start: 6, end: 7, value: 30 },
+		{ start: 2, end: 4, value: 10 },
+		{ start: 2, end: 6, value: 30 },
 	],
-	180, // splits the 100 into three
-	[{ start: 0, end: 1, value: 5 }, { start: 0, end: 1, value: 7 }],
-	7, // equal intervals: the larger, not the sum
-	// Spans the boundary: 100 is beaten by 40+40+40, and the trailing job at
-	// start 9 conflicts with the last of those.
+	1,
+	140, // top-1 is 80, greedy is 60, sum is 170
 	[
-		{ start: 0, end: 10, value: 100 },
-		{ start: 1, end: 2, value: 40 },
-		{ start: 2, end: 3, value: 40 },
-		{ start: 3, end: 4, value: 40 },
-		{ start: 9, end: 11, value: 30 },
+		{ start: 2, end: 3, value: 80 },
+		{ start: 12, end: 14, value: 10 },
+		{ start: 12, end: 14, value: 30 },
+		{ start: 2, end: 6, value: 20 },
+		{ start: 8, end: 9, value: 60 },
+		{ start: 10, end: 14, value: 20 },
 	],
-	150, // 40+40+40; the 30 at start 9 overlaps the job ending at 4
+	1,
+	170, // top-1 is 80, greedy is 160, sum is 220
+	[
+		{ start: 12, end: 14, value: 20 },
+		{ start: 1, end: 4, value: 50 },
+		{ start: 0, end: 2, value: 50 },
+		{ start: 12, end: 14, value: 70 },
+	],
+	1,
+	120, // top-1 is 70, greedy is 70, sum is 190
+	[
+		{ start: 7, end: 9, value: 50 },
+		{ start: 5, end: 6, value: 50 },
+		{ start: 0, end: 1, value: 10 },
+		{ start: 11, end: 13, value: 100 },
+		{ start: 7, end: 9, value: 80 },
+	],
+	1,
+	240, // top-1 is 100, greedy is 210, sum is 290
 ];
 
 // --- 4. spec compliance under many simultaneous constraints ------------------
 // Six constraints that conflict if any one is forgotten. Counted individually so
 // the score shows which constraint the model dropped.
+// Nine constraints that fight each other. Six were previously satisfied by a
+// single short sentence, so the test had no headroom; these cannot all be met
+// without counting words, watching the tail, and avoiding a banned token.
 const T_SPEC = [
-	"Rewrite this sentence to satisfy ALL of these constraints:",
-	"1. exactly 12 words or fewer",
-	"2. all lowercase, no capitals anywhere",
-	"3. no commas",
+	"Rewrite the sentence below to satisfy ALL nine constraints:",
+	"1. exactly 11 words",
+	"2. all lowercase, no capital letters",
+	"3. no commas and no full stops",
 	"4. must contain the word 'cache'",
-	"5. must end with a question mark",
-	"6. must contain the digits 7 and 9",
-	"Output only the rewritten sentence, nothing else.",
+	"5. must contain the word 'stale'",
+	"6. must NOT contain the letter sequence 'zz'",
+	"7. must not repeat any word",
+	"8. must end with a question mark",
+	"9. must contain the number 7",
+	"Output only the rewritten sentence.",
 	"",
-	"Sentence: The Fast Cache Layer Reduced Our Latency Last Quarter.",
+	"Sentence: Our Cache Served Stale Records And The Team Noticed Seven Days Later.",
 ].join("\n");
 
 const SPEC_RULES = [
-	["<=12 words", (s) => s.trim().split(/\s+/).filter(Boolean).length <= 12],
+	["exactly 11 words", (s) => s.trim().split(/\s+/).filter(Boolean).length === 11],
 	["lowercase", (s) => s === s.toLowerCase()],
-	["no commas", (s) => !s.includes(",")],
-	["contains cache", (s) => /cache/i.test(s)],
+	["no , or .", (s) => !/[,\.]/.test(s)],
+	["has cache", (s) => /\bcache\b/i.test(s)],
+	["has stale", (s) => /\bstale\b/i.test(s)],
+	["no zz", (s) => !/zz/i.test(s)],
+	["no repeat words", (s) => {
+		const w = s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean);
+		return new Set(w).size === w.length;
+	}],
 	["ends with ?", (s) => s.trim().endsWith("?")],
-	["has 7 and 9", (s) => /7/.test(s) && /9/.test(s)],
+	["has 7", (s) => /7/.test(s)],
 ];
 
 // --- 5. a real operational judgement -----------------------------------------
@@ -212,6 +262,17 @@ const OPS_FACTS = [
 	["warns the risk is real", /still (crash|oom|die|go down)|unresolved|may (crash|oom|die)|not (contained|solved|fixed)|risk remains/i],
 ];
 
+// Grouped from the flat triple list, with a length check: an index mismatch here
+// silently scores a correct solution as 0, and a wrong "expected" count is
+// invisible in the output.
+const CASE_TRIPLES = [];
+for (let i = 0; i < SCHED_CASES.length; i += 3) {
+	CASE_TRIPLES.push([SCHED_CASES[i], SCHED_CASES[i + 1], SCHED_CASES[i + 2]]);
+}
+if (SCHED_CASES.length % 3 !== 0 || CASE_TRIPLES.some((t) => t.length !== 3 || !Array.isArray(t[0]))) {
+	throw new Error(`SCHED_CASES must be a flat list of [jobs, k, expected] triples; got ${SCHED_CASES.length} entries`);
+}
+
 // ---------------------------------------------------------------------------
 // transport
 // ---------------------------------------------------------------------------
@@ -222,9 +283,12 @@ async function call(model, body) {
 	// No max_tokens. Omitting the field lets the provider use its own default,
 	// which avoids both a self-invented cap and a model that answers in three
 	// tokens because a small ceiling told it to.
+	//
+	// `messages` is passed through when supplied so a tool loop can replay
+	// history; otherwise a single user turn is built from `content`.
 	const payload = {
 		model,
-		messages: [{ role: "user", content: body.content }],
+		messages: body.messages ?? [{ role: "user", content: body.content }],
 		stream: false,
 	};
 	if (body.tools) {
@@ -287,6 +351,85 @@ async function catalog(def) {
 	return (unwrapCompletion(body) ?? body).data ?? [];
 }
 
+/**
+ * Drive a multi-turn tool loop until the model answers in prose.
+ *
+ * Providers return a single tool call and stop; they do not chain calls in one
+ * turn. Any test requiring two tools therefore has to feed the first result
+ * back, or it scores a correct model as failing for stopping when it was
+ * required to continue.
+ *
+ * The stub results are deliberately unflattering: the order is unshipped but
+ * the SKU is out of stock, so the correct decision is NO. A model that calls
+ * only one tool and guesses YES should not score.
+ */
+const TOOL_RESULTS = {
+	get_order: JSON.stringify({
+		order_id: "ORD-4471",
+		status: "unshipped",
+		sku: "SKU-88213",
+		quantity: 1,
+		placed: "2026-09-24",
+	}),
+	get_inventory: JSON.stringify({ sku: "SKU-88213", in_stock: 0, restock_eta_days: 6 }),
+};
+
+async function runToolLoop(model, content, required, maxTurns = 4) {
+	const def = currentDef;
+	if (!def) throw new Error("no provider selected — pass --provider <id>");
+
+	const started = Date.now();
+	const messages = [{ role: "user", content }];
+	const called = new Set();
+	let turns = 0;
+	let lastContent = "";
+
+	for (let turn = 0; turn < maxTurns; turn += 1) {
+		const res = await call(model, { content: undefined, tools: TOOLS, messages });
+		turns += 1;
+		if (!res.ok) {
+			return { ok: false, status: res.status, error: res.error, seconds: (Date.now() - started) / 1000 };
+		}
+
+		const toolCalls = res.toolCalls ?? [];
+		if (toolCalls.length === 0) {
+			lastContent = res.content ?? "";
+			break;
+		}
+
+		// Record the assistant turn verbatim, then append each tool result.
+		messages.push({
+			role: "assistant",
+			content: res.content ?? "",
+			tool_calls: toolCalls.map((c) => ({
+				id: c.id ?? `call_${turn}_${called.size}`,
+				type: "function",
+				function: { name: c.function.name, arguments: c.function.arguments },
+			})),
+		});
+		for (const c of toolCalls) {
+			called.add(c.function?.name);
+			messages.push({
+				role: "tool",
+				tool_call_id: c.id ?? `call_${turn}_${called.size}`,
+				content: TOOL_RESULTS[c.function?.name] ?? JSON.stringify({ error: "unknown tool" }),
+			});
+		}
+		lastContent = res.content ?? "";
+	}
+
+	const missing = required.filter((name) => !called.has(name));
+	return {
+		ok: true,
+		content: lastContent,
+		toolCalls: [...called].map((name) => ({ function: { name } })),
+		calledNames: [...called],
+		missing,
+		turns,
+		seconds: (Date.now() - started) / 1000,
+	};
+}
+
 // ---------------------------------------------------------------------------
 // scorers
 // ---------------------------------------------------------------------------
@@ -310,16 +453,16 @@ function runPython(code) {
 		"if f is None:",
 		"    print(json.dumps({'error': 'no best_sched defined'})); raise SystemExit",
 		"out = []",
-		"for inp in cases:",
+		"for jobs, k in cases:",
 		"    try:",
-		"        out.append({'val': f(inp)})",
+		"        out.append({'val': f(jobs, k)})",
 		"    except Exception as e:",
 		"        out.append({'val': None, 'err': type(e).__name__})",
 		"print(json.dumps(out))",
 	].join("\n");
 
 	const stdout = execFileSync(PYTHON, ["-c", driver], {
-		input: `${JSON.stringify(SCHED_CASES.filter((_, i) => i % 2 === 0))}\n${code}`,
+		input: `${JSON.stringify(CASE_TRIPLES.map(([jobs, k]) => [jobs, k]))}\n${code}`,
 		encoding: "utf-8",
 		timeout: 30000,
 		stdio: ["pipe", "pipe", "pipe"],
@@ -343,38 +486,62 @@ function scoreCode(content) {
 	// Partial credit proportional to cases solved. A model that solves 3 of 5
 	// has shown partial competence, which a boolean would flatten to zero.
 	let correct = 0;
-	const total = SCHED_CASES.length / 2;
-	out.forEach((row, i) => {
-		if (row.val === SCHED_CASES[i * 2 + 1]) correct += 1;
+	CASE_TRIPLES.forEach(([, , expected], i) => {
+		if (out[i]?.val === expected) correct += 1;
 	});
+	const total = CASE_TRIPLES.length;
 	return { pass: correct / total, note: `${correct}/${total} cases` };
 }
 
-/** Multi-step tool use: both tools must be called and a decision stated. */
+/**
+ * Multi-step tool use.
+ *
+ * Requires both tools to have been called, and the decision to be correct. The
+ * stub results make the order unshipped but the SKU out of stock with a 6-day
+ * restock, so the right answer is NO. Calling both tools and answering YES means
+ * the model read neither result.
+ */
 function scoreTools(result) {
-	const names = (result.toolCalls ?? []).map((c) => c.function?.name);
-	const called = new Set(names);
-	if (!called.has("get_order") || !called.has("get_inventory")) {
-		return { pass: 0, note: `called ${[...called].join("+") || "nothing"}` };
+	const called = new Set((result.toolCalls ?? []).map((c) => c.function?.name));
+	const missing = result.missing ?? [];
+	if (missing.length > 0) {
+		return { pass: 0, note: `never called ${missing.join(", ")} over ${result.turns ?? 1} turn(s)` };
 	}
-	// Reject a well-formed decision with no justification: the format spec says
-	// REASON is required, and an empty one means the tools were decorative.
-	const hasReason = result.content.length > 12;
-	if (!hasReason) return { pass: 0.5, note: "both tools called, no reason given" };
-	return { pass: 1, note: "both tools + reasoned decision" };
+	const decision = /SHIP=(YES|NO)/i.exec(result.content ?? "");
+	if (!decision) {
+		return { pass: 0.5, note: `both tools called, no SHIP= decision in the reply` };
+	}
+	if (decision[1].toUpperCase() !== "NO") {
+		// Both tools were consulted and the answer is still wrong: the model
+		// gathered the evidence and did not use it.
+		return { pass: 0.5, note: "both tools called, but answered YES against zero stock" };
+	}
+	// The format spec also requires a reason, capped at 12 words.
+	const reason = /REASON=(.*)/i.exec(result.content ?? "");
+	if (!reason || reason[1].trim().split(/\s+/).length > 12) {
+		return { pass: 0.7, note: "correct decision, missing or oversized REASON" };
+	}
+	return { pass: 1, note: `both tools over ${result.turns} turns, correct decision + reason` };
 }
 
 function scoreDebug(content) {
 	const lower = content.toLowerCase();
-	// Must name the real defect: the range stops one short, dropping the last
-	// even index on even-length input.
-	const findsBug = /off.?by.?one|len\(items\) ?- ?1|drop|last (even )?index|misses|stops? (one )?short|too short/i.test(lower);
-	// Must propose the correct class of fix.
-	const proposesFix = /len\(items\)|range\(0, ?len\(items\), ?2\)/i.test(content) || /use ?len\(items\)/i.test(content) || /adjust|fix|change|replace|remove the ?- ?1/i.test(lower);
-	if (findsBug && proposesFix) return { pass: 1, note: "found the off-by-one and fixed it" };
-	if (findsBug) return { pass: 0.5, note: "found the bug, no concrete fix" };
-	if (proposesFix) return { pass: 0.4, note: "proposed a change, misdiagnosed the cause" };
-	return { pass: 0, note: "did not identify the defect" };
+	// The defect is an unbounded cache, so the cause must be identified as
+	// unbounded growth or eviction, not as a syntax or indexing slip.
+	const mechanism = /unbounded|no bound|never evict|unlimited|keeps growing|grows without|memory|evict/.test(lower);
+	// A correct diagnosis connects the growth to the latency regression.
+	const links = /(hit rate|cache miss|miss(es)?|fall(s|ing)? back|db|postgres|database|every request|slow)/.test(lower);
+	// A real fix bounds the cache. Anchored to a specific bound, because a bare
+	// "limit" or "drop" matches any sentence that happens to mention the problem.
+	// The fix is looked for in the closing sentence only. Scanning the whole
+	// answer matched the problem statement itself — "never evicts" contains
+	// "evict" — so a pure diagnosis scored as if it had proposed a remedy.
+	const closing = (content.trim().split(/(?<=[.!?])\s+/).pop() ?? "");
+	const fixes = /\b(lru|ttl|max_?size|maxsize|least recently used|time.?to.?live|bounded|expire|eviction|cap)\b/i.test(closing);
+	if (mechanism && links && fixes) return { pass: 1, note: "unbounded cache + why it hurts + a bound" };
+	if (mechanism && links) return { pass: 0.7, note: "correct mechanism and impact, no fix proposed" };
+	if (mechanism) return { pass: 0.4, note: "named the cause, did not connect it to latency" };
+	return { pass: 0, note: "did not identify unbounded growth" };
 }
 
 function scoreSpec(content) {
@@ -413,9 +580,16 @@ async function evaluate(model) {
 		? { ...scoreDebug(debug.content), ok: true, seconds: debug.seconds }
 		: { pass: 0, ok: false, error: debug.error, status: debug.status, seconds: debug.seconds };
 
-	const tools = await call(model, { content: T_TOOLS, tools: TOOLS });
+	// A real agent loop, not a single request.
+	//
+	// This test needs BOTH tools, and no model can call two tools in one turn
+	// without seeing the first result — providers return one tool call and stop.
+	// Scoring the first response alone therefore fails every correct model for
+	// stopping where it is required to continue, and reports a capability gap
+	// that is really a missing tool-result round trip.
+	const tools = await runToolLoop(model, T_TOOLS, ["get_order", "get_inventory"]);
 	results.tools = tools.ok
-		? { ...scoreTools(tools), ok: true, seconds: tools.seconds }
+		? { ...scoreTools(tools), ok: true, seconds: tools.seconds, turns: tools.turns }
 		: { pass: 0, ok: false, error: tools.error, status: tools.status, seconds: tools.seconds };
 
 	const spec = await call(model, { content: T_SPEC });
@@ -499,9 +673,101 @@ function report(rows) {
 	}
 }
 
+/**
+ * Offline self-test: the scorers must discriminate, verified without a network.
+ *
+ * A correct answer has to score 1.0 and plausible wrong answers must not.
+ * Checking this by hand is how the wrong expected value (150 for a case whose
+ * true optimum was 200) survived long enough to make a correct solution look
+ * wrong.
+ */
+async function selfTest() {
+	let failures = 0;
+	const check = (ok, name, detail) => {
+		if (!ok) failures++;
+		console.log(`  ${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
+	};
+
+	console.log("\n=== code: k-machine scheduling (executed) ===");
+	const exact = `\`\`\`python
+def best_sched(jobs, k):
+    def ok(sel):
+        ev = []
+        for j in sel:
+            ev.append((j['start'], 1)); ev.append((j['end'], -1))
+        ev.sort(key=lambda e: (e[0], e[1]))
+        c = 0
+        for t, d in ev:
+            c += d
+            if c > k: return False
+        return c == 0
+    best = 0
+    def rec(i, sel, val):
+        nonlocal best
+        if ok(sel) and val > best:
+            best = val
+        if i == len(jobs):
+            return
+        rec(i + 1, sel + [jobs[i]], val + jobs[i]['value'])
+        rec(i + 1, sel, val)
+    rec(0, [], 0)
+    return best
+\`\`\``;
+	const g = scoreCode(exact);
+	check(g.pass === 1, "exact search scores 1.0", `${g.pass} (${g.note})`);
+
+	const topk = scoreCode("```python\ndef best_sched(jobs, k):\n    return sum(j['value'] for j in sorted(jobs, key=lambda x: -x['value'])[:k])\n```");
+	check(topk.pass < 0.5, "top-k-by-value does not score high", `${topk.pass} (${topk.note})`);
+
+	const sumAll = scoreCode("```python\ndef best_sched(jobs, k):\n    return sum(j['value'] for j in jobs)\n```");
+	check(sumAll.pass === 0, "sum-everything scores 0", `${sumAll.pass} (${sumAll.note})`);
+
+	console.log("\n=== debug: unbounded cache ===");
+	const d1 = scoreDebug("The cache is unbounded and never evicts, so it grows until the hit rate collapses and every read falls back to Postgres. Bound it with an LRU.");
+	check(d1.pass === 1, "mechanism + impact + fix", `${d1.pass} (${d1.note})`);
+	const d2 = scoreDebug("The cache is unbounded and never evicts, so it consumes memory and the hit rate drops.");
+	check(d2.pass > 0 && d2.pass < 1, "cause without a fix is partial", `${d2.pass} (${d2.note})`);
+	const d3 = scoreDebug("There is a missing await before the value is read.");
+	check(d3.pass === 0, "a plausible wrong diagnosis scores 0", `${d3.pass} (${d3.note})`);
+
+	console.log("\n=== spec: 9 conflicting constraints ===");
+	const s1 = scoreSpec("can a stale cache entry still be served after 7 days?");
+	check(s1.pass === 1, "a valid answer exists and scores 1.0", `${s1.pass} (${s1.note})`);
+	const s2 = scoreSpec("can a stale cache entry be served after 7 days?");
+	check(s2.pass < 1, "10 words is not 1.0", `${s2.pass.toFixed(3)} (${s2.note})`);
+	const s3 = scoreSpec("Our cache served stale records to 7 users, daily.");
+	check(s3.pass < 0.6, "capitals/comma/no-question scores low", `${s3.pass.toFixed(3)} (${s3.note})`);
+
+	console.log("\n=== ops: judgement under missing authority ===");
+	const o1 = scoreOps("I can't deploy: the only engineer with prod access is on leave for 10 hours. I can raise an alert. Without containment this will OOM in about 6 hours, so the risk remains.");
+	check(o1.pass === 1, "recognises the authority gap and the runout", `${o1.pass} (${o1.note})`);
+	const o2 = scoreOps("I will roll back the last deploy and add more memory, which resolves the leak.");
+	check(o2.pass < 1, "confident but unexecutable plan is not 1.0", `${o2.pass} (${o2.note})`);
+
+	console.log("\n=== tools: two-step chain ===");
+	const t1 = scoreTools({ toolCalls: [{ function: { name: "get_order" } }, { function: { name: "get_inventory" } }], missing: [], turns: 3, content: "SHIP=NO REASON=SKU out of stock, 6 day restock" });
+	check(t1.pass === 1, "both tools + correct NO + reason", `${t1.pass} (${t1.note})`);
+	const t2 = scoreTools({ toolCalls: [{ function: { name: "get_order" } }], missing: ["get_inventory"], turns: 1, content: "SHIP=NO REASON=not shipped" });
+	check(t2.pass === 0, "stopped after one tool scores 0", `${t2.pass} (${t2.note})`);
+	const t3 = scoreTools({ toolCalls: [{ function: { name: "get_order" } }, { function: { name: "get_inventory" } }], missing: [], turns: 3, content: "SHIP=YES REASON=send it now" });
+	check(t3.pass < 1, "wrong decision is not 1.0", `${t3.pass} (${t3.note})`);
+
+	console.log(
+		`\n${failures === 0 ? "ALL SCORER CHECKS PASSED" : `${failures} CHECK(S) FAILED — the eval would misreport`}`,
+	);
+	process.exit(failures === 0 ? 0 : 1);
+}
+
 // ---------------------------------------------------------------------------
 
 const argv = process.argv.slice(2);
+
+// The scorer check runs before any provider is selected, so it needs no keys
+// and no network.
+if (argv.includes("--self-test")) {
+	await selfTest();
+}
+
 const explicit = [];
 let all = false;
 let jsonOut = null;
