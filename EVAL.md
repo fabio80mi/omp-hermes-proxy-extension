@@ -45,6 +45,33 @@ node scripts/eval-models.mjs --self-test
 A full pass over all 24 audited models takes over an hour. That is the one case
 where background execution is reasonable — ask first, and record the PID.
 
+## History: the audit and the eval are different things
+
+They answer different questions and are stored separately. Conflating them is
+how a fast, cheap check ends up being treated as a quality judgement.
+
+| | audit | eval |
+|---|---|---|
+| question | does the model work? | is the model good? |
+| measures | chat, tool calls, repeatability | code/debug/tools/spec/ops, 3 complexities each |
+| verdict | `stable` after 2 of 3 runs | median over the last 3 runs, plus spread |
+| stored in | `audit-history/`, `audit-stable.json` | `eval-history/`, `eval-summary.json` |
+| gates registration | **yes** — this is what earns a `verified-` provider | **no** — it only ranks |
+
+Every eval run is appended to `eval-history/<provider>/` automatically. `--json`
+is an ad-hoc export, not the record.
+
+**Why the median, and why the spread matters.** The same model scored 64, 83 and
+60 on three consecutive runs of an identical suite. A single run is therefore
+close to meaningless, and `eval-summary.json` reports the median alongside
+max-min. A model averaging 80 with a 30-point spread is a different tool from
+one averaging 80 with a 2-point spread, and a ranking that ignores the spread
+will confidently put the flaky one first.
+
+Ranking sorts by median, then by spread, so a model that scores the same every
+time outranks one that alternates. Back up `eval-history/`: losing it returns
+every model to "no data".
+
 ## Design: three complexities per category
 
 Each category asks three questions of increasing difficulty. Each is a

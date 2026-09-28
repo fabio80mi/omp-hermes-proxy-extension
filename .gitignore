@@ -22,3 +22,10 @@ audit-history/
 
 # Quality-eval output — regenerate with scripts/eval-models.mjs
 eval-*.json
+
+# Derived eval summary, regenerated from the history on every run.
+eval-summary.json
+
+# Append-only eval history, same reasoning as audit-history/: it grows without
+# bound and losing it silently returns every model to "no data". Back it up.
+eval-history/

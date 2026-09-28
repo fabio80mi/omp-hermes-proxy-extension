@@ -26,6 +26,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+	appendRun as appendEvalRun,
+	format as formatEvalSummary,
+	readHistory as readEvalHistory,
+	summarise as summariseEvals,
+	writeSummary as writeEvalSummary,
+} from "./eval-history.mjs";
+
+import {
 	buildHeaders,
 	fetchFreeModels,
 	isFreeModel,
@@ -1551,4 +1559,24 @@ await writeJson(false);
 if (jsonOut) {
 	console.log(`\nwrote ${jsonOut.startsWith("/") ? jsonOut : `${REPO}${jsonOut}`}`);
 }
+
+// History is written unconditionally. `--json` is an ad-hoc export, not the
+// record: before this, an eval run left nothing behind unless you remembered to
+// ask for it, and even then the next run overwrote the file. The same model
+// scored 64, 83 and 60 across three identical runs, so one run is not a verdict
+// and losing it costs the only evidence there is.
+const evalRun = {
+	generatedAt: new Date().toISOString(),
+	provider: currentDef.id,
+	baseUrl: currentDef.baseUrl,
+	weights: WEIGHTS,
+	rows,
+};
+const historyPath = appendEvalRun(currentDef.id, evalRun);
+console.log(`appended run to ${historyPath}`);
+
+const summary = summariseEvals(readEvalHistory(currentDef.id));
+writeEvalSummary(summary);
+console.log(`wrote ${join(REPO, "eval-summary.json")}`);
+console.log(`\n${formatEvalSummary(summary)}`);
 
