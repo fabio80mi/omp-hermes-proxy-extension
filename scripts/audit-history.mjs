@@ -55,6 +55,26 @@ const PASS_STATES = new Set(["ok"]);
 /** States that mean the model is gone for good, whichever run saw it. */
 const TERMINAL_STATES = new Set(["end_of_life", "dead", "paid"]);
 
+/**
+ * States where the request never really tested the model.
+ *
+ * These describe the moment, not the model: the provider was busy, the socket
+ * stalled, or the model spent its whole budget thinking. Treating any of them
+ * as evidence against a model invents a failure that never happened, so they
+ * are excluded from the pass/fail tally and never remove a model from the
+ * picker.
+ */
+const INCONCLUSIVE_STATES = new Set(["throttled", "timeout", "error", "limited"]);
+
+/**
+ * Statuses that earn a place in the picker.
+ *
+ * `stable` is proven; `known-good` and `unstable` are provisional but have
+ * worked and have not been permanently broken. Anything the owner depends on
+ * should stay put unless it is genuinely gone.
+ */
+const PICKER_STATUSES = new Set(["stable", "known-good", "unstable"]);
+
 function ensureDir() {
 	if (!existsSync(HISTORY_DIR)) mkdirSync(HISTORY_DIR, { recursive: true });
 }
@@ -173,36 +193,63 @@ export function computeStable(runs, { window = WINDOW, needed = NEEDED } = {}) {
 
 		const models = [];
 		for (const [id, observations] of entry.seen) {
-			const passes = observations.filter((o) => PASS_STATES.has(o.state)).length;
+			// Throttling, timeouts and reasoning-budget exhaustion are properties
+			// of the provider at that moment, not of the model. All five throttled
+			// models in one run were throttled simultaneously, so a 429 says
+			// "the provider was busy", not "these models are bad".
+			//
+			// Counting them as failures both invented evidence against models
+			// that demonstrably work and made the picker churn on busy
+			// afternoons. They are missing data, not verdicts: excluded from the
+			// denominator, and never grounds for removal.
+			const usable = observations.filter((o) => !INCONCLUSIVE_STATES.has(o.state));
+			const passes = usable.filter((o) => PASS_STATES.has(o.state)).length;
 			const terminal = observations.find((o) => TERMINAL_STATES.has(o.state));
 			const inNewest = newestIds.has(id);
 
 			let status;
 			let reason;
 			if (terminal) {
+				// The only conditions that remove a model. Both are permanent:
+				// a provider that retired or de-listed a model does not bring it
+				// back, so this is not churn.
 				status = "retired";
 				reason = `${terminal.state}: ${terminal.detail ?? ""}`.trim();
 			} else if (!inNewest) {
 				status = "retired";
 				reason = "absent from the most recent successful catalog";
-			} else if (observations.length < needed) {
-				// Not enough history to judge. Not a rejection.
-				status = "new";
-				reason = `only ${observations.length} run(s) of history, needs ${needed}`;
 			} else if (passes === 0) {
-				// Never passed. Different from `unstable`, which means it
-				// sometimes works and is worth retrying later.
-				status = "rejected";
+				// Judged and found wanting on every attempt we actually got to
+				// make. If those attempts were all throttles there is nothing to
+				// judge, so this stays a lack of evidence rather than a verdict.
+				status = usable.length === 0 ? "unknown" : "rejected";
 				const last = observations[observations.length - 1];
-				reason = `never passed in ${observations.length} run(s); last: ${last.state}${last.status ? ` (HTTP ${last.status})` : ""}`;
+				reason =
+					usable.length === 0
+						? `no usable observation in ${observations.length} run(s); all inconclusive (${[...new Set(observations.map((o) => o.state))].join(", ")})`
+						: `never passed in ${usable.length} usable run(s); last: ${last.state}${last.status ? ` (HTTP ${last.status})` : ""}`;
+			} else if (usable.length < needed) {
+				// Worked, but not enough comparable evidence to call it steady.
+				status = "known-good";
+				reason = `passed ${passes}/${usable.length} usable run(s), needs ${needed} to be stable`;
 			} else if (passes >= needed) {
 				status = "stable";
-				reason = `passed ${passes}/${observations.length} recent runs`;
+				reason = `passed ${passes}/${usable.length} usable runs`;
 			} else {
 				status = "unstable";
-				reason = `passed ${passes}/${observations.length} recent runs, needs ${needed}`;
+				reason = `passed ${passes}/${usable.length} usable runs, needs ${needed}`;
 			}
-			models.push({ id, status, reason, passes, observations: observations.length });
+			models.push({
+				id,
+				status,
+				reason,
+				passes,
+				observations: observations.length,
+				usable: usable.length,
+				// In the picker, but not because it is proven — it has worked at
+				// least once and nothing permanent has happened to it.
+				provisional: status === "known-good" || status === "unstable",
+			});
 		}
 
 		out.push({
@@ -218,7 +265,11 @@ export function computeStable(runs, { window = WINDOW, needed = NEEDED } = {}) {
 
 	return {
 		generatedAt: new Date().toISOString(),
-		rule: `a model is stable when it passes at least ${needed} of the last ${recent.length} runs`,
+		rule:
+			`a model is stable when it passes at least ${needed} of its last ${recent.length} runs, ` +
+			`counting only runs that actually reached the model. Throttled, timed-out and ` +
+			`budget-limited runs are inconclusive and never count against a model. A model is ` +
+			`removed only on a permanent condition (dead, end-of-life, paid, absent from the catalogue).`,
 		window: recent.length,
 		needed,
 		runsConsidered: recent.map((r) => r.generatedAt),
@@ -227,11 +278,24 @@ export function computeStable(runs, { window = WINDOW, needed = NEEDED } = {}) {
 }
 
 /** Only the models eligible for a `verified-*` provider. */
+/**
+ * Model IDs that belong in the picker.
+ *
+ * `stable` is the proven tier. `known-good` and `unstable` are provisional: the
+ * model has worked at least once and nothing permanent has happened to it, so
+ * leaving it out would only churn the user's configuration on a busy afternoon
+ * for no gain. The alternative — exposing them under a distinct name — would
+ * force every consumer to carry two lists, and OMP's model picker has no
+ * concept of a tier anyway.
+ *
+ * `rejected`, `retired` and `unknown` are excluded: a model that has never
+ * worked, or that is permanently gone, has no claim on a slot.
+ */
 export function stableIds(stable) {
 	const ids = new Set();
 	for (const provider of stable.providers ?? []) {
 		for (const model of provider.models ?? []) {
-			if (model.status === "stable") ids.add(`${provider.id}/${model.id}`);
+			if (PICKER_STATUSES.has(model.status)) ids.add(`${provider.id}/${model.id}`);
 		}
 	}
 	return ids;
@@ -247,7 +311,8 @@ export function summarise(stable) {
 	for (const provider of stable.providers ?? []) {
 		const t = provider.tally;
 		lines.push(
-			`  ${provider.id}: ${t.stable ?? 0} stable, ${t.new ?? 0} new, ${t.unstable ?? 0} unstable, ${t.retired ?? 0} retired` +
+			`  ${provider.id}: ${t.stable ?? 0} stable, ${t["known-good"] ?? 0} known-good, ${t.unstable ?? 0} unstable, ` +
+				`${t.rejected ?? 0} rejected, ${t.retired ?? 0} retired, ${t.new ?? 0} new` +
 				`  (from ${provider.window} run(s), needs ${provider.needed})`,
 		);
 		for (const model of provider.models ?? []) {

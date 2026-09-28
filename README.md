@@ -110,13 +110,28 @@ single snapshot cannot tell a broken model from an unlucky attempt — our own
 eval scored one model 100, 33 and 0 on three identical runs, and providers are
 no steadier. The derived verdict lands in `audit-stable.json`:
 
-| Status | Meaning |
-|---|---|
-| `stable` | Passed at least 2 of the last 3 runs. **Only these get a `verified-` provider.** |
-| `unstable` | Passed sometimes, not often enough. Worth retrying later. |
-| `rejected` | Never passed. Not transient. |
-| `retired` | Absent from the newest successful catalogue, or reported end-of-life. |
-| `new` | Present, but too little history to judge. |
+| Status | Meaning | In picker |
+|---|---|---|
+| `stable` | Passed at least 2 of the last 3 runs. Proven. | yes |
+| `known-good` | Worked, but not enough comparable evidence yet. | yes |
+| `unstable` | Worked once, then failed. Worth retrying later. | yes |
+| `rejected` | Reached, and never worked. | no |
+| `unknown` | Never actually reached — every attempt was throttled. | no |
+| `retired` | Permanently gone: `dead`, `end_of_life`, `paid`, or absent from the catalogue. | no |
+| `new` | Too little history to judge. | no |
+
+**A throttle is not evidence against a model.** `throttled`, `timeout`, `error`
+and `limited` describe the moment, not the model: in one run, five Kilo models
+returned 429 simultaneously, which says the provider was busy, not that those
+five models are broken. They are excluded from the pass/fail tally and never
+remove a model from the picker.
+
+That is deliberate, and it is the tradeoff between a picker that is always
+right and one that does not churn. Only a permanent condition — dead,
+end-of-life, no longer free, absent from the catalogue — removes a model, and
+those do not come back. Everything else leaves a model in place. If a
+configuration depends on a model ID, it keeps working; the only models that
+disappear are the ones that are genuinely gone.
 
 The free catalogue changes over time — new models appear, existing ones stop
 being free. Retirement is therefore expected, not a fault, and the generated
@@ -127,9 +142,9 @@ Two rules worth knowing:
 - **Absence is only retirement when the run that lacked it succeeded.** A
   provider whose catalogue fetch failed says nothing about its models; treating
   that as retirement would empty the picker after one bad request.
-- **A model needs 2 runs before it can be `stable`.** After the first audit
-  everything is `new`, so the picker is sparse until history accumulates. That is
-  the rule working, not a failure.
+- **A model needs 2 usable runs before it can be `stable`.** After the first
+  audit everything is `known-good` or `new`; the picker fills up rather than
+  staying empty.
 
 History is bounded at 10 runs (`KEEP` in `scripts/audit-history.mjs`). Older
 runs are pruned after each run and the pruning is printed. The limit is asserted

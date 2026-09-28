@@ -727,6 +727,15 @@ function readStable(): StableDoc | null {
  * model is "new", and reading that as "no filter" would register the entire
  * free catalogue — the exact opposite of the rule.
  */
+/**
+ * Statuses that earn a place in the picker.
+ *
+ * Must stay in step with PICKER_STATUSES in scripts/audit-history.mjs. Kept
+ * as a literal rather than an import because the extension runs inside OMP's
+ * runtime and must not depend on a build step to stay correct.
+ */
+const PICKER_STATUSES = new Set(["stable", "known-good", "unstable"]);
+
 function loadVerifiedIds(): Set<string> | null {
 	const stable = readStable();
 	if (!stable) return null;
@@ -734,11 +743,18 @@ function loadVerifiedIds(): Set<string> | null {
 		const ids = new Set<string>();
 		for (const provider of stable.providers ?? []) {
 			for (const model of provider.models ?? []) {
-				// `stable` means passed 2 of the last 3 runs. `unstable` failed,
-				// `new` has too little history, `retired` has stopped being
-				// offered — none of them belong in a list that promises every
-				// entry works.
-				if (model.status === "stable") ids.add(`${provider.id}/${model.id}`);
+				// `stable` is the proven tier: passed 2 of the last 3 runs.
+				//
+				// `known-good` and `unstable` are provisional — the model has
+				// worked at least once and nothing permanent has happened to it.
+				// They are included deliberately: a throttle or timeout says
+				// the provider was busy, not that the model is bad, and
+				// dropping it would churn the owner's configuration on a busy
+				// afternoon for no gain.
+				//
+				// `rejected` (never worked), `retired` (permanently gone) and
+				// `unknown` (never actually reached) earn no slot.
+				if (PICKER_STATUSES.has(model.status)) ids.add(`${provider.id}/${model.id}`);
 			}
 		}
 		return ids;
