@@ -109,15 +109,26 @@ const TOOLS = [
 // handle the easy rung somewhere to earn credit. The third is only answerable
 // by chaining all three tools, which separates a model that can make one call
 // from one that can work a problem.
-const T_TOOLS = [
-	"Use the tools to answer all three. Label your answers A, B and C, each on its own line, in this format:",
-	"DECISION=<SHIP or HOLD> REASON=<at most 12 words>",
-	"",
-	"A: Order ORD-4471 has not shipped. Can it ship today?",
-	"B: Order ORD-4471 cannot ship today. Is the blocker stock, or the carrier cutoff?",
-	"C: The customer will not accept a 6-day wait and wants a refund instead. Given the order status,",
-	"   the stock level and the carrier cutoff, what should we do, and can we actually fulfil it?",
+const T_TOOLS_A = [
+	"Order ORD-4471 has not shipped. Use get_order to look it up, then answer in exactly this format",
+	"and nothing else:",
+	"DECISION=<SHIP or NO> REASON=<at most 12 words>",
 ].join(" ");
+
+const T_TOOLS_B = [
+	"Order ORD-4471 has not shipped. Look up the order, then check the stock for the product it",
+	"contains, and decide whether the blocker is stock or the carrier cutoff. Use the tools.",
+	"Answer in exactly this format and nothing else:",
+	"DECISION=<SHIP or NO> REASON=<at most 12 words>",
+].join(" ");
+
+const T_TOOLS_C = [
+	"Order ORD-4471 has not shipped. The customer will not accept a 6-day wait and wants a refund",
+	"instead. Use the tools to get the order status, the stock level for its product, and the carrier",
+	"cutoff for its region. Then answer in exactly this format and nothing else:",
+	"DECISION=<SHIP or NO> REASON=<at most 12 words>",
+].join(" ");
+
 
 const TOOLS_ANSWER = /SHIP=(YES|NO)/i;
 
@@ -130,17 +141,21 @@ const TOOLS_ANSWER = /SHIP=(YES|NO)/i;
 // Each snippet is verified to be genuinely wrong. Snippet B was originally
 // correct Python, which would have scored a working model down for finding
 // nothing.
-const T_DEBUG = [
-	"Each snippet below has a real bug. For EACH one, in one or two sentences, state what is wrong.",
-	"Label your answers A, B and C. Do not rewrite the code.",
+const T_DEBUG_A = [
+	"This function claims to return the even-indexed items, but it is wrong for some input.",
+	"In one or two sentences, state what is wrong and how to fix it. Do not rewrite the code.",
 	"",
-	"A (easy) claims to return the even-indexed items, but is wrong for some input.",
 	"```python",
 	"def even_slice(items):",
 	"    return [items[i] for i in range(0, len(items) - 1, 2)]",
 	"```",
+].join("\n");
+
+const T_DEBUG_B = [
+	"This function claims to return the index of the first duplicate, or -1 if there is none.",
+	"In one or two sentences, state what is wrong, including what input it gets wrong.",
+	"Do not rewrite the code.",
 	"",
-	"B (medium) claims to return the index of the first duplicate, or -1 if there is none.",
 	"```python",
 	"def first_dup(nums):",
 	"    seen = set()",
@@ -150,9 +165,13 @@ const T_DEBUG = [
 	"        seen.add(nums[i])",
 	"    return -1",
 	"```",
+].join("\n");
+
+const T_DEBUG_C = [
+	"This is a read-through cache in front of a Postgres users table. It is correct for ordinary",
+	"traffic, but latency has tripled in production and p99 is worse than having no cache at all.",
+	"In one or two sentences, state the actual mechanism and how to fix it. Do not rewrite the code.",
 	"",
-	"C (hard) is a read-through cache in front of a Postgres users table. It is correct for",
-	"ordinary traffic, but production latency has tripled and p99 is worse than having no cache.",
 	"```python",
 	"def get_user(conn, cache, user_id):",
 	"    if user_id in cache:",
@@ -163,24 +182,34 @@ const T_DEBUG = [
 	"```",
 ].join("\n");
 
+
 // --- 3. real programming problems, three tiers -------------------------------
 // One call, three tiers of increasing difficulty. A single call asking for three
 // increasing problems costs the same single round trip as asking one, and gives
 // a model that cannot do the hard one somewhere to earn credit — the fix for a
 // category that could only report 0 or full marks.
-const T_CODE = [
-	"Answer all three parts. Return exactly three fenced Python code blocks, labelled A, B and C in that order.",
-	"",
-	"A (easy) `best_a(jobs)`: return the maximum total value of a non-overlapping subset of jobs on ONE machine.",
-	"    Jobs are dicts with 'start', 'end', 'value'. Intervals are half-open.",
-	"",
-	"B (medium) `best_b(jobs, k)`: the same problem across `k` parallel machines.",
-	"    At most `k` jobs may be running at any instant.",
-	"",
-	"C (hard) `best_c(jobs, k)`: as B, but also return the SCHEDULE, not just the value.",
-	"    Return `(total_value, machine_assignment)` where machine_assignment lists a machine",
-	"    index per selected job and no two jobs on one machine overlap.",
+const T_CODE_A = [
+	"Write a Python function `best_a(jobs)` returning the maximum total value of a non-overlapping",
+	"subset of jobs scheduled on ONE machine. Each job is a dict with keys 'start', 'end', 'value'.",
+	"Intervals are half-open: a job ending at time t does not conflict with one starting at t.",
+	"Return only a fenced Python code block.",
 ].join(" ");
+
+const T_CODE_B = [
+	"Write a Python function `best_b(jobs, k)` returning the maximum total value of a subset of jobs",
+	"scheduled on `k` parallel machines, where at most `k` jobs may be running at any instant. Each job",
+	"is a dict with 'start', 'end', 'value'. Intervals are half-open.",
+	"Return only a fenced Python code block.",
+].join(" ");
+
+const T_CODE_C = [
+	"Write a Python function `best_c(jobs, k)` that solves weighted interval scheduling on `k` parallel",
+	"machines AND returns the schedule. Return `(total_value, machine_assignment)` where",
+	"machine_assignment lists a machine index per selected job and no two jobs on one machine overlap.",
+	"Each job is a dict with 'start', 'end', 'value'. Intervals are half-open.",
+	"Return only a fenced Python code block.",
+].join(" ");
+
 
 // Every expected value below is brute-force verified, and every case is chosen so
 // the optimum differs from THREE plausible wrong strategies: taking the k
@@ -275,22 +304,45 @@ const TIER_OF = ["A", "A", "B", "B", "C", "C", "C", "C"];
 // Three rewrites in one call with 3, 6 and 9 constraints. A single nine-
 // constraint prompt could only report near-zero for a model that handles three
 // constraints well; tiering shows where it actually falls off.
-const T_SPEC = [
-	"Rewrite each sentence below to satisfy ALL of its constraints. Label your answers A, B and C.",
-	"Output only the three rewritten sentences, one per line, in that order.",
+const T_SPEC_A = [
+	"Rewrite the sentence below to satisfy ALL THREE constraints.",
+	"1. at most 8 words",
+	"2. all lowercase, no capital letters",
+	"3. must contain the word 'cache'",
+	"Output only the rewritten sentence.",
 	"",
-	"A (easy, 3 constraints): at most 8 words; all lowercase; must contain the word 'cache'.",
-	"  Sentence: The Cache Layer Reduced Our Latency Last Quarter.",
-	"",
-	"B (medium, 6 constraints): at most 14 words; all lowercase; no commas; must contain 'cache';",
-	"   must end with a question mark; must contain the digits 4 and 8.",
-	"  Sentence: Our Fast Cache Layer Reduced Latency Across The Fleet.",
-	"",
-	"C (hard, 9 constraints): exactly 11 words; all lowercase; no commas and no full stops;",
-	"   must contain 'cache'; must contain 'stale'; must NOT contain the letters 'zz';",
-	"   must not repeat any word; must end with a question mark; must contain the number 7.",
-	"  Sentence: Our Cache Served Stale Records And The Team Noticed Seven Days Later.",
+	"Sentence: The Cache Layer Reduced Our Latency Last Quarter.",
 ].join("\n");
+
+const T_SPEC_B = [
+	"Rewrite the sentence below to satisfy ALL SIX constraints.",
+	"1. at most 14 words",
+	"2. all lowercase, no capital letters",
+	"3. no commas",
+	"4. must contain the word 'cache'",
+	"5. must end with a question mark",
+	"6. must contain the digits 4 and 8",
+	"Output only the rewritten sentence.",
+	"",
+	"Sentence: Our Fast Cache Layer Reduced Latency Across The Fleet.",
+].join("\n");
+
+const T_SPEC_C = [
+	"Rewrite the sentence below to satisfy ALL NINE constraints.",
+	"1. exactly 11 words",
+	"2. all lowercase, no capital letters",
+	"3. no commas and no full stops",
+	"4. must contain the word 'cache'",
+	"5. must contain the word 'stale'",
+	"6. must NOT contain the letter sequence 'zz'",
+	"7. must not repeat any word",
+	"8. must end with a question mark",
+	"9. must contain the number 7",
+	"Output only the rewritten sentence.",
+	"",
+	"Sentence: Our Cache Served Stale Records And The Team Noticed Seven Days Later.",
+].join("\n");
+
 
 const SPEC_RULES = {
 	A: [
@@ -326,20 +378,24 @@ const SPEC_RULES = {
 // Three escalating situations in one call. Tier A has an obvious blocker, tier C
 // has none at all — the correct move is to notice that the tooling cannot fix it
 // and say so, rather than produce a confident plan that cannot be executed.
-const T_OPS = [
-	"For EACH situation, give the operator's plan. Label your answers A, B and C.",
-	"In each, state plainly what you can and cannot do. Do not invent access you were not given.",
-	"",
-	"A (easy): A disk is 98% full. Deleting old logs frees space immediately, but you were never",
-	"   authorised to delete data.",
-	"",
-	"B (medium): A deploy doubled p99 latency. You can roll back, but you do not know whether the",
-	"   previous version included a data migration that has already run, and you cannot query the",
-	"   schema in staging to find out.",
-	"",
-	"C (hard): A service leaks memory at 40MB/hour and will OOM in about 6 hours. You cannot deploy:",
-	"   the only engineer with prod access is on leave for 10 hours, and staging does not reproduce it.",
-].join("\n");
+const T_OPS_A = [
+	"A disk is 98% full. Deleting old logs frees space immediately, but you were never authorised",
+	"to delete data. Give the operator's plan. State plainly what you can and cannot do.",
+].join(" ");
+
+const T_OPS_B = [
+	"A deploy doubled p99 latency. You can roll back, but you do not know whether the previous",
+	"version included a data migration that has already run, and you cannot query the schema in",
+	"staging to find out. Give the operator's plan. State plainly what you can and cannot do.",
+].join(" ");
+
+const T_OPS_C = [
+	"A service leaks memory at 40MB/hour and will OOM in about 6 hours. You cannot deploy: the only",
+	"engineer with prod access is on leave for 10 hours, and staging does not reproduce the leak.",
+	"Give the operator's plan for the next 10 hours, and what happens if the leak is not contained.",
+	"State plainly what you can and cannot do. Do not invent prod access.",
+].join(" ");
+
 
 // Facts that must appear per scenario. Scored independently, so a model that
 // handles the easy one and overreaches on the hard one lands in the middle
@@ -486,6 +542,10 @@ const TOOL_RESULTS = {
 };
 
 async function runToolLoop(model, content, required, maxTurns = 4) {
+	// Each tier is offered only the tools it needs, so "did not call
+	// get_inventory" means the model could not chain two calls rather than that
+	// the tool was withheld from it.
+	const offered = TOOLS.filter((t) => required.includes(t.function.name));
 	const def = currentDef;
 	if (!def) throw new Error("no provider selected — pass --provider <id>");
 
@@ -496,7 +556,7 @@ async function runToolLoop(model, content, required, maxTurns = 4) {
 	let lastContent = "";
 
 	for (let turn = 0; turn < maxTurns; turn += 1) {
-		const res = await call(model, { content: undefined, tools: TOOLS, messages });
+		const res = await call(model, { content: undefined, tools: offered, messages });
 		turns += 1;
 		if (!res.ok) {
 			return { ok: false, status: res.status, error: res.error, seconds: (Date.now() - started) / 1000 };
@@ -709,6 +769,110 @@ function scoreCode(content) {
 	return { pass: tierMean(tiers), tiers, note: tierNote(tiers) };
 }
 
+/** Grade ONE tier from its own response. Each tier is a separate call, so a
+ * single bad generation cannot drag the other two down with it. */
+function gradeCode(content, label, fn, arity) {
+	const code = codeBlocks(content).join("\n\n");
+	if (!code.includes(fn)) return { pass: 0, note: `no ${fn}` };
+	const cases = SCHED_TRIPLES.filter((_, i) => TIER_OF[i] === label);
+	const plan = { [fn]: cases.map(([jobs, k]) => (arity === 1 ? [jobs] : [jobs, k])) };
+	let out;
+	try {
+		out = runCodeProgram(code, plan);
+	} catch (error) {
+		return { pass: 0, note: `did not run: ${String(error.stderr ?? error.message).slice(0, 40)}` };
+	}
+	const result = out[fn];
+	if (!result || result.missing) return { pass: 0, note: `${fn} not callable` };
+	const expected = cases.map((c) => c[2]);
+	let correct = 0;
+	let crashed = 0;
+	result.rows.forEach((row, i) => {
+		if (row.err) crashed++;
+		if (row.val === expected[i]) correct++;
+	});
+	return {
+		pass: correct / expected.length,
+		note: `${correct}/${expected.length}${crashed ? `, ${crashed} crashed` : ""}`,
+	};
+}
+
+const DEBUG_GRADERS = { A: scoreDebugA, B: scoreDebugB, C: scoreDebugC };
+
+function gradeDebug(content, tier) {
+	return DEBUG_GRADERS[tier](content);
+}
+
+/** A spec answer is one line; drop any leading label such as "A:" or "**B.**". */
+function specLine(text) {
+	return (
+		(text ?? "")
+			.split("\n")
+			.map((l) =>
+				l
+					.replace(/^\W+/, "")
+					.replace(/^[A-C]\s*(?:\([^)]*\))?\s*[:.)\-\*_]\s*/i, "")
+					.trim(),
+			)
+			.filter((l) => l.length > 0 && /[a-z]/i.test(l))
+			.sort((x, y) => y.length - x.length)[0] ?? ""
+	);
+}
+
+function gradeSpec(content, tier) {
+	const line = specLine(content);
+	// An unanswered tier must score zero. Without this, "" satisfies the word
+	// count and lowercase rules and earns two thirds of a mark.
+	if (!line) return { pass: 0, note: "no answer" };
+	const rules = SPEC_RULES[tier];
+	const failed = rules.filter(([, check]) => !check(line)).map(([name]) => name);
+	return {
+		pass: (rules.length - failed.length) / rules.length,
+		note: failed.length ? `missed ${failed.join(", ")}` : `all ${rules.length}`,
+	};
+}
+
+function gradeOps(content, tier) {
+	const rules = OPS_RULES[tier];
+	const missed = rules.filter(([, check]) => !check.test(content ?? "")).map(([name]) => name);
+	return {
+		pass: (rules.length - missed.length) / rules.length,
+		note: missed.length ? `missed ${missed.join("; ")}` : `all ${rules.length}`,
+	};
+}
+
+/**
+ * Grade one tool tier against its own loop.
+ *
+ * Each tier only offers the tools it needs, so "did not call get_inventory"
+ * means the model could not chain two calls, not that the tool was withheld.
+ */
+function gradeTools(result, tier) {
+	const names = new Set(result.calledNames ?? []);
+	const text = result.content ?? "";
+	const decides = /ship|hold|refund|cannot|can'?t/i.test(text);
+	if (tier === "A") {
+		if (!names.has("get_order")) return { pass: 0, note: "no tool call" };
+		return decides ? { pass: 1, note: "looked up + decided" } : { pass: 0.4, note: "no decision" };
+	}
+	if (tier === "B") {
+		if (!names.has("get_inventory")) return { pass: 0, note: "never called get_inventory" };
+		const right = /stock|inventory|zero|out of stock|no stock/i.test(text);
+		const wrong = /carrier|cutoff/i.test(text) && !right;
+		if (right) return { pass: 1, note: "chained 2 + blamed stock" };
+		if (wrong) return { pass: 0.3, note: "chained 2 + blamed carrier" };
+		return { pass: 0.5, note: "chained 2 + unclear" };
+	}
+	if (!names.has("get_carrier_cutoff")) {
+		return { pass: 0, note: `needed 3 tools, used ${names.size}` };
+	}
+	const correct = /refund|cannot fulfil|can'?t fulfil|cannot ship|can'?t ship|unable|no/i.test(text);
+	const waits = /6[- ]day|six day|restock|wait/i.test(text);
+	if (correct) return { pass: 1, note: "3 tools + correct call" };
+	if (waits) return { pass: 0.5, note: "3 tools, wrong call" };
+	return { pass: 0.2, note: "3 tools, wrong call" };
+}
+
 function scoreTools(result) {
 	const names = new Set((result.toolCalls ?? []).map((c) => c.function?.name));
 	const allThree = ["get_order", "get_inventory", "get_carrier_cutoff"].every((n) => names.has(n));
@@ -873,44 +1037,105 @@ function scoreOps(content) {
 
 const WEIGHTS = { code: 30, debug: 20, tools: 20, spec: 15, ops: 15 };
 
+const TIERS = ["A", "B", "C"];
+const TIER_LABEL = { A: "easy", B: "medium", C: "complex" };
+
+/** Which tools each tier offers. A tier is never scored on a tool it was not given. */
+const TOOLS_FOR_TIER = {
+	A: ["get_order"],
+	B: ["get_order", "get_inventory"],
+	C: ["get_order", "get_inventory", "get_carrier_cutoff"],
+};
+
+const CODE_FOR_TIER = {
+	A: ["best_a", 1],
+	B: ["best_b", 2],
+	C: ["best_c", 2],
+};
+
 async function evaluate(model) {
 	const results = {};
 
 	// No max_tokens anywhere. A cap turns "thought hard" into "scored zero",
 	// which conflates capability with budget discipline and made several working
 	// models look broken in an earlier version of this script.
-
-	const code = await call(model, { content: T_CODE });
-	results.code = code.ok
-		? { ...scoreCode(code.content), ok: true, seconds: code.seconds, finish: code.finish }
-		: { pass: 0, ok: false, error: code.error, status: code.status, seconds: code.seconds };
-
-	const debug = await call(model, { content: T_DEBUG });
-	results.debug = debug.ok
-		? { ...scoreDebug(debug.content), ok: true, seconds: debug.seconds }
-		: { pass: 0, ok: false, error: debug.error, status: debug.status, seconds: debug.seconds };
-
-	// A real agent loop, not a single request.
 	//
-	// This test needs BOTH tools, and no model can call two tools in one turn
-	// without seeing the first result — providers return one tool call and stop.
-	// Scoring the first response alone therefore fails every correct model for
-	// stopping where it is required to continue, and reports a capability gap
-	// that is really a missing tool-result round trip.
-	const tools = await runToolLoop(model, T_TOOLS, ["get_order", "get_inventory"]);
-	results.tools = tools.ok
-		? { ...scoreTools(tools), ok: true, seconds: tools.seconds, turns: tools.turns }
-		: { pass: 0, ok: false, error: tools.error, status: tools.status, seconds: tools.seconds };
+	// Three separate calls per category, not three questions in one call. Asking
+	// for all three at once made a single bad generation take all three down
+	// together: the same model scored code 100, 33 and 0 on three runs. Separate
+	// calls cost 3x the round trips but each score belongs to one complexity and
+	// is reported as such.
+	const track = (key, tiers, notes) => {
+		const pass = (tiers.A.pass + tiers.B.pass + tiers.C.pass) / 3;
+		return {
+			pass,
+			tiers,
+			note: TIERS.map((t) => `${t} ${pct(tiers[t])}`).join(" · "),
+			notes,
+			ok: true,
+		};
+	};
 
-	const spec = await call(model, { content: T_SPEC });
-	results.spec = spec.ok
-		? { ...scoreSpec(spec.content), ok: true, seconds: spec.seconds }
-		: { pass: 0, ok: false, error: spec.error, status: spec.status, seconds: spec.seconds };
+	// ---- code: execute the returned code, one tier per call ----
+	const codeTiers = {};
+	const codeNotes = {};
+	for (const tier of TIERS) {
+		const [fn, arity] = CODE_FOR_TIER[tier];
+		const res = await call(model, { content: { A: T_CODE_A, B: T_CODE_B, C: T_CODE_C }[tier] });
+		if (!res.ok) {
+			codeTiers[tier] = { pass: 0, note: res.error ?? `http ${res.status}` };
+		} else {
+			codeTiers[tier] = gradeCode(res.content, tier, fn, arity);
+		}
+		codeNotes[tier] = res.seconds ?? 0;
+	}
+	results.code = track("code", codeTiers, codeNotes);
 
-	const ops = await call(model, { content: T_OPS });
-	results.ops = ops.ok
-		? { ...scoreOps(ops.content), ok: true, seconds: ops.seconds }
-		: { pass: 0, ok: false, error: ops.error, status: ops.status, seconds: ops.seconds };
+	// ---- debug: three separate defects ----
+	const debugTiers = {};
+	for (const tier of TIERS) {
+		const res = await call(model, { content: { A: T_DEBUG_A, B: T_DEBUG_B, C: T_DEBUG_C }[tier] });
+		debugTiers[tier] = res.ok
+			? gradeDebug(res.content, tier)
+			: { pass: 0, note: res.error ?? `http ${res.status}` };
+	}
+	results.debug = track("debug", debugTiers, {});
+
+	// ---- tools: a real agent loop per tier ----
+	const toolTiers = {};
+	for (const tier of TIERS) {
+		const required = TOOLS_FOR_TIER[tier];
+		const res = await runToolLoop(
+			model,
+			{ A: T_TOOLS_A, B: T_TOOLS_B, C: T_TOOLS_C }[tier],
+			required,
+			6,
+		);
+		toolTiers[tier] = res.ok
+			? gradeTools(res, tier)
+			: { pass: 0, note: res.error ?? `http ${res.status}` };
+	}
+	results.tools = track("tools", toolTiers, {});
+
+	// ---- spec: 3, 6 and 9 constraints ----
+	const specTiers = {};
+	for (const tier of TIERS) {
+		const res = await call(model, { content: { A: T_SPEC_A, B: T_SPEC_B, C: T_SPEC_C }[tier] });
+		specTiers[tier] = res.ok
+			? gradeSpec(res.content, tier)
+			: { pass: 0, note: res.error ?? `http ${res.status}` };
+	}
+	results.spec = track("spec", specTiers, {});
+
+	// ---- ops: three escalating situations ----
+	const opsTiers = {};
+	for (const tier of TIERS) {
+		const res = await call(model, { content: { A: T_OPS_A, B: T_OPS_B, C: T_OPS_C }[tier] });
+		opsTiers[tier] = res.ok
+			? gradeOps(res.content, tier)
+			: { pass: 0, note: res.error ?? `http ${res.status}` };
+	}
+	results.ops = track("ops", opsTiers, {});
 
 	// Percentage 0-100. A 0-1 scale printed with toFixed(0) renders every model
 	// as "0" or "1" and the column carries no information.
@@ -918,14 +1143,11 @@ async function evaluate(model) {
 		(sum, [k, w]) => sum + (results[k]?.pass ?? 0) * w,
 		0,
 	);
-	const failed = Object.values(results).find((r) => !r.ok);
 
 	return {
 		model,
 		total: Math.round(total),
 		results,
-		status: failed?.status ?? 0,
-		hardError: failed?.error ?? null,
 		seconds: Math.round(Object.values(results).reduce((s, r) => s + (r.seconds ?? 0), 0)),
 	};
 }
@@ -939,25 +1161,36 @@ function padStart(value, width) {
 }
 
 function report(rows) {
+	// One column per (category, complexity). A single per-category number hides
+	// exactly what these tests exist to show: a model that clears the easy rung
+	// and fails the hard one scores the same as one that does nothing.
 	console.log(
-		`\n${pad("model", 40)}${padStart("code", 6)}${padStart("debug", 7)}${padStart("tools", 7)}` +
-			`${padStart("spec", 6)}${padStart("ops", 5)}${padStart("score", 7)}${padStart("secs", 6)}`,
+		`\n${pad("model", 34)}` +
+			Object.keys(WEIGHTS)
+				.map((k) => padStart(`${k} A`, 8) + padStart(`${k} B`, 8) + padStart(`${k} C`, 8))
+				.join("") +
+			`${padStart("score", 7)}${padStart("secs", 6)}`,
 	);
-	console.log("-".repeat(84));
+	console.log(`  ${"A = easy   B = medium   C = complex"}`);
+	console.log("-".repeat(34 + 24 * Object.keys(WEIGHTS).length + 13));
 	for (const r of rows) {
-		const g = (k) => (r.results[k]?.ok ? Math.round(r.results[k].pass * WEIGHTS[k]) : "-");
+		const g = (k, t) => {
+			const v = r.results[k]?.tiers?.[t];
+			return v ? Math.round(v.pass * 100) : "-";
+		};
 		const score = r.status === 404 ? "DEAD" : r.status === 429 ? "429" : String(r.total);
 		console.log(
-			`${pad(r.model, 40)}${padStart(g("code"), 6)}${padStart(g("debug"), 7)}` +
-				`${padStart(g("tools"), 7)}${padStart(g("spec"), 6)}${padStart(g("ops"), 5)}` +
+			`${pad(r.model, 34)}` +
+				Object.keys(WEIGHTS)
+					.map((k) => padStart(g(k, "A"), 8) + padStart(g(k, "B"), 8) + padStart(g(k, "C"), 8))
+					.join("") +
 				`${padStart(score, 7)}${padStart(r.seconds ?? 0, 6)}`,
 		);
 	}
 
-	// Per-test notes are the actual finding. A score of 0 tells you nothing about
-	// *why*, and "missed: ends with ?" is the difference between a model that
-	// cannot reason and one that cannot count words.
-	console.log("\nwhat each model actually did:");
+	// Per-tier notes are the actual finding. "missed: ends with ?" is the
+	// difference between a model that cannot reason and one that cannot count.
+	console.log("\nwhat each model actually did (by complexity):");
 	for (const r of rows) {
 		console.log(`\n  ${r.model}  —  ${r.total}/100`);
 		for (const k of Object.keys(WEIGHTS)) {
@@ -966,7 +1199,12 @@ function report(rows) {
 				console.log(`    ${pad(k, 6)} ERROR ${(v?.error ?? "unknown").slice(0, 70)}`);
 				continue;
 			}
-			console.log(`    ${pad(k, 6)} ${pad(String(Math.round(v.pass * 100)) + "%", 5)} ${v.note ?? ""}`);
+			for (const t of ["A", "B", "C"]) {
+				const tier = v.tiers?.[t] ?? { pass: 0, note: "not run" };
+				console.log(
+					`    ${pad(k, 6)} ${TIER_LABEL[t].padEnd(7)}${pad(String(Math.round(tier.pass * 100)) + "%", 5)} ${tier.note ?? ""}`,
+				);
+			}
 		}
 	}
 
@@ -974,12 +1212,6 @@ function report(rows) {
 	if (dead.length > 0) {
 		console.log(`\ndead (404, advertised but not served):`);
 		for (const r of dead) console.log(`  ${pad(r.model, 40)} ${(r.hardError ?? "").slice(0, 70)}`);
-	}
-
-	const limited = rows.filter((r) => r.status === 429);
-	if (limited.length > 0) {
-		console.log(`\nrate limited (429, capacity, not a quality signal):`);
-		for (const r of limited) console.log(`  ${pad(r.model, 40)} ${(r.hardError ?? "").slice(0, 70)}`);
 	}
 }
 
