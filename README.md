@@ -16,8 +16,10 @@ provider's free models, and registers them as separate OMP providers
 `refreshModels` hook, so lists update without restarting OMP.
 
 Separately, `scripts/audit-models.mjs` probes every free model for chat and
-tool-calling support and writes the verdicts to `audit.json`, which in turn
-generates the opencode provider blocks.
+tool-calling support, appends the result to an audit history, and derives
+`audit-stable.json`: a model earns the `verified-` name by passing at least 2
+of the last 3 runs, not by passing once. The same verdict generates the opencode
+provider blocks.
 
 Providers are registered separately rather than merged because model ids collide
 across upstreams — `stealth/space-bunny-alpha` is available from Hermes, Cline,
@@ -80,8 +82,11 @@ node scripts/audit-models.mjs --provider kilo    # one provider
 node scripts/audit-models.mjs --delay 2000       # slower, gentler
 ```
 
-It writes `audit.json` and regenerates `opencode.providers.json`. Verdicts are
-deliberately granular:
+Probes are serial and spaced out. Parallel probes trigger provider rate limits,
+and a 429 caused by our own concurrency is indistinguishable from a genuinely
+throttled model — we would record confident wrong verdicts on a schedule.
+
+### Verdicts
 
 | Verdict | Meaning |
 |---|---|
@@ -91,12 +96,45 @@ deliberately granular:
 | `throttled` | HTTP 429. Rate limited upstream — retry later, never a permanent verdict. |
 | `timeout` | No response in time. Inconclusive, retried once. |
 | `paid` | Advertised free, answers 402. The provider's free flag was wrong. |
-| `dead` | HTTP 404/410. The model is gone. |
+| `end_of_life` | HTTP 410. The provider retired the model and **keeps advertising it**, so disappearing from the catalogue will never detect this. |
+| `dead` | HTTP 404. Absent, or not entitled to this account. |
+| `auth_error` | HTTP 401/403. A problem with the key, never a model verdict. |
 
 Throttled, timed-out, and errored models are re-probed once after a 20s pause
 before the result is recorded.
 
-### Why it probes serially
+### History and stability
+
+Every run is appended to `audit-history/` and never overwritten, because a
+single snapshot cannot tell a broken model from an unlucky attempt — our own
+eval scored one model 100, 33 and 0 on three identical runs, and providers are
+no steadier. The derived verdict lands in `audit-stable.json`:
+
+| Status | Meaning |
+|---|---|
+| `stable` | Passed at least 2 of the last 3 runs. **Only these get a `verified-` provider.** |
+| `unstable` | Passed sometimes, not often enough. Worth retrying later. |
+| `rejected` | Never passed. Not transient. |
+| `retired` | Absent from the newest successful catalogue, or reported end-of-life. |
+| `new` | Present, but too little history to judge. |
+
+The free catalogue changes over time — new models appear, existing ones stop
+being free. Retirement is therefore expected, not a fault, and the generated
+opencode file records it explicitly rather than leaving a silent gap.
+
+Two rules worth knowing:
+
+- **Absence is only retirement when the run that lacked it succeeded.** A
+  provider whose catalogue fetch failed says nothing about its models; treating
+  that as retirement would empty the picker after one bad request.
+- **A model needs 2 runs before it can be `stable`.** After the first audit
+  everything is `new`, so the picker is sparse until history accumulates. That is
+  the rule working, not a failure.
+
+`audit-history/` is git-ignored because it grows without bound. Back it up:
+losing it silently resets stability to "no history".
+
+## Why it probes serially
 
 Parallel probes trigger provider rate limits, and a 429 caused by our own
 concurrency is indistinguishable from a genuinely throttled model. We would then

@@ -33,6 +33,14 @@ import {
 	probeModel,
 	resolveKey,
 } from "../src/providers.mjs";
+import {
+	appendRun,
+	computeStable,
+	readHistory,
+	stableIds,
+	summarise,
+	writeStable,
+} from "./audit-history.mjs";
 
 const argv = process.argv.slice(2);
 let only = null;
@@ -137,7 +145,8 @@ for (const def of providers) {
 		return acc;
 	}, {});
 	console.log(`  -> ${tally.ok ?? 0} ok, ${tally.partial ?? 0} chat-only, ${tally.limited ?? 0} budget-limited, ` +
-		`${tally.throttled ?? 0} throttled, ${tally.paid ?? 0} paid, ${tally.dead ?? 0} dead, ${tally.error ?? 0} error`);
+		`${tally.throttled ?? 0} throttled, ${tally.paid ?? 0} paid, ${tally.dead ?? 0} dead, ` +
+		`${tally.end_of_life ?? 0} end-of-life, ${tally.auth_error ?? 0} auth, ${tally.error ?? 0} error`);
 
 	report.providers.push({
 		id: def.id,
@@ -156,9 +165,24 @@ for (const def of providers) {
 writeFileSync(AUDIT_PATH, JSON.stringify(report, null, 2));
 console.log(`\nwrote ${AUDIT_PATH}`);
 
+// Append, never overwrite. The history is what makes a stability verdict
+// possible; a single overwritten file cannot distinguish a broken model from an
+// unlucky attempt.
+const historyPath = appendRun(report);
+console.log(`appended run to ${historyPath}`);
+
+const history = readHistory();
+const stable = computeStable(history);
+const stablePath = writeStable(stable);
+console.log(`\nwrote ${stablePath}`);
+console.log(`\n${stable.rule}`);
+console.log(summarise(stable));
+
 if (writeOpencode) {
+	// The export is rendered from the stability verdict, not from this run
+	// alone, so a one-off pass cannot add a model that has never repeated.
 	const { renderOpencode } = await import("./render-opencode.mjs");
 	const target = join(ROOT_DIR, "opencode.providers.json");
-	writeFileSync(target, renderOpencode(report));
+	writeFileSync(target, renderOpencode(report, { stable, ids: stableIds(stable) }));
 	console.log(`wrote ${target}`);
 }

@@ -310,8 +310,21 @@ export async function probeModel(def, modelId, { maxTokens = PROBE_MIN_TOKENS, t
 		} else if (verdict.status === 402) {
 			verdict.state = "paid";
 			verdict.detail = "advertised free but requires credits";
-		} else if (verdict.status === 404 || verdict.status === 410) {
+		} else if (verdict.status === 410) {
+			// End of life, not a missing model and not a transient failure. The
+			// provider will keep advertising it, so "absent from the catalog"
+			// can never detect this on its own.
+			verdict.state = "end_of_life";
+			verdict.detail = String(error.body ?? "").slice(0, 160);
+		} else if (verdict.status === 404) {
+			// Absent or not entitled. Permanent for this account, but it is a
+			// different fact from a provider retiring a model.
 			verdict.state = "dead";
+			verdict.detail = String(error.body ?? "").slice(0, 120);
+		} else if (verdict.status === 401 || verdict.status === 403) {
+			// Authentication/authorisation, not a model verdict. A bad key makes
+			// every model look broken; never let that retire one.
+			verdict.state = "auth_error";
 			verdict.detail = String(error.body ?? "").slice(0, 120);
 		} else {
 			verdict.state = "error";

@@ -341,123 +341,24 @@ function readSeed(): WireModel[] {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // opencode export
 // ---------------------------------------------------------------------------
 
 /**
- * Every provider this extension has registered, for the opencode export.
+ * The opencode export is owned by the audit, not by this extension.
  *
- * Populated as each provider finishes loading rather than passed in, because the
- * additional providers load asynchronously and independently: the export has to
- * reflect whatever has actually registered, whenever that is.
+ * Both used to write opencode.providers.json from different sources: this one
+ * from whatever had happened to register in OMP, the audit from its own probe
+ * results. When both ran they disagreed, and it was never clear which was
+ * authoritative.
+ *
+ * The audit has the stronger claim. It sees the stability history, and a model
+ * only belongs in a file whose name promises verification if it has passed more
+ * than once. Registration order and probe history are different inputs, and only
+ * one of them survives a restart.
  */
-const OPENCODE_REGISTRY = new Map<string, { label: string; baseUrl: string; models: ProviderModelConfig[] }>();
 
-/**
- * Render one provider's models as an `opencode.jsonc` block.
- *
- * Written for manual pasting: this extension never touches the user's opencode
- * config. opencode has no discovery mechanism comparable to OMP's, so the block
- * has to be copied in by hand.
- *
- * Field mapping differs from the OMP registration:
- *   limit.context / limit.output  <- context_length / top_provider.max_completion_tokens
- *   modalities.input               <- text and image only; opencode declares no
- *                                    video/audio/file input modality
- *   variants.<level>               <- one entry per advertised reasoning effort
- */
-function renderProvider(
-	models: ProviderModelConfig[],
-	label: string,
-	baseUrl: string,
-): Record<string, unknown> {
-	const entries: Record<string, unknown> = {};
-
-	for (const model of models) {
-		const wire = WIRE_BY_ID.get(model.id);
-		const entry: Record<string, unknown> = {
-			name: model.name,
-			limit: { context: model.contextWindow, output: model.maxTokens },
-			modalities: { input: [...model.input], output: ["text"] },
-		};
-
-		const efforts = wire?.reasoning?.supported_efforts;
-		if (efforts && efforts.length > 0) {
-			const variants: Record<string, unknown> = {};
-			for (const level of THINKING_LEVELS) {
-				if (efforts.includes(level)) variants[level] = { reasoningEffort: level };
-			}
-			// A model that advertises "none" can also run with reasoning disabled.
-			if (efforts.includes("none") && !wire?.reasoning?.mandatory) {
-				variants.none = { reasoningEffort: "none" };
-			}
-			if (Object.keys(variants).length > 0) entry.variants = variants;
-		}
-
-		entries[model.id] = entry;
-	}
-
-	return {
-		npm: "@ai-sdk/openai-compatible",
-		name: label,
-		// opencode's openai-compatible provider sets the Authorization header from
-		// apiKey itself, so no "Bearer " prefix here. Credentials are NOT written
-		// to this file: the user supplies their own in opencode.jsonc.
-		options: { baseURL: baseUrl.replace("localhost", "127.0.0.1") },
-		models: entries,
-	};
-}
-
-/**
- * A trailing JSONC comment listing what the audit excluded and why.
- *
- * This is the information people otherwise re-investigate by hand: a model that
- * is absent from the export is absent on purpose, not an oversight.
- */
-function renderExclusions(): string {
-	const audit = readAudit();
-	if (!audit) return "";
-	const lines: string[] = [];
-	for (const provider of audit.providers ?? []) {
-		const bad = (provider.models ?? []).filter((m) => m.state !== "ok");
-		if (bad.length === 0) continue;
-		lines.push(` * verified-${provider.id}:`);
-		for (const m of bad) lines.push(` *   ${m.id}: ${m.state} — ${m.detail ?? ""}`);
-	}
-	if (lines.length === 0) return "";
-	return ["/*", " * Excluded during the audit — reachable but not usable as an agent model.", " *", ...lines, " */", ""].join("\n");
-}
-
-/** Write every registered `verified-*` provider to the opencode export. */
-function writeOpencode(): void {
-	if (OPENCODE_REGISTRY.size === 0) return;
-	try {
-		const provider: Record<string, unknown> = {};
-		for (const [id, entry] of OPENCODE_REGISTRY) {
-			if (entry.models.length === 0) continue;
-			provider[id] = renderProvider(entry.models, entry.label, entry.baseUrl);
-		}
-		if (Object.keys(provider).length === 0) return;
-
-		const doc = {
-			$comment: OPENCODE_COMMENT,
-			generatedAt: new Date().toISOString(),
-			provider,
-		};
-		// JSONC: a trailing block comment records what the audit excluded, which
-		// is the part people otherwise re-investigate by hand. Strict JSON
-		// parsers reject it, so anything piping this file must strip it.
-		const excluded = renderExclusions();
-		const tmp = `${OPENCODE_PATH}.${process.pid}.tmp`;
-		writeFileSync(tmp, `${JSON.stringify(doc, null, 2)}\n${excluded}`, "utf-8");
-		renameSync(tmp, OPENCODE_PATH);
-		report(`opencode export: ${Object.keys(provider).length} provider(s) written`);
-	} catch (error) {
-		report(`could not write opencode export: ${errorMessage(error)}`);
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Network
 // ---------------------------------------------------------------------------
 
@@ -586,14 +487,6 @@ async function loadCatalog(config: HermesConfig, allowNetwork: boolean): Promise
 					catalog: selection.wire,
 					probes,
 				});
-				// The opencode export is driven by what actually registers, not by
-				// this one provider's result. Record here, write once at the end.
-				OPENCODE_REGISTRY.set(PROVIDER_ID, {
-					label: "Hermes Proxy (verified)",
-					baseUrl: config.baseUrl,
-					models: selection.models,
-				});
-				writeOpencode();
 				return {
 					models: selection.models,
 					source: "proxy",
@@ -741,10 +634,15 @@ function registerAdditionalProviders(pi: ExtensionAPI): void {
 		const load = async (): Promise<ProviderModelConfig[]> => {
 			const catalog = await fetchProviderFreeModels(def as never);
 			const mapped = catalog.models
-				// When an audit exists it is the authority. Without one, fall back
-				// to the full free list rather than registering nothing, so a
-				// first run before the audit still gives a usable picker.
-				.filter((m) => verified.size === 0 || verified.has(`${def.id}/${String((m as { id?: string }).id)}`))
+				// A verdict exists and is the authority: register only what is
+				// stable. A null verdict means the audit has never run, so fall
+				// back to the full free list rather than an empty picker.
+				//
+				// Note `verified === null` and `verified.size === 0` are NOT the
+				// same: the first is "no audit yet", the second is "the audit ran
+				// and nothing qualified". Treating the second as the first
+				// registers the whole catalogue, defeating the rule.
+				.filter((m) => verified === null || verified.has(`${def.id}/${String((m as { id?: string }).id)}`))
 				.map((model) => mapProviderModel(model as never, { maxContextWindow: 2_000_000 }))
 				.filter(Boolean) as unknown as ProviderModelConfig[];
 			return mapped;
@@ -779,12 +677,6 @@ function registerAdditionalProviders(pi: ExtensionAPI): void {
 					if (!context?.allowNetwork || context?.signal?.aborted) return models;
 					try {
 						models = await load();
-						OPENCODE_REGISTRY.set(providerId, {
-							label: `${def.label} (verified)`,
-							baseUrl: def.baseUrl,
-							models,
-						});
-						writeOpencode();
 					} catch (error) {
 						report(`${providerId}: refresh failed: ${errorMessage(error)}`);
 					}
@@ -794,14 +686,6 @@ function registerAdditionalProviders(pi: ExtensionAPI): void {
 
 			report(`${providerId}: registered ${models.length} verified model(s) from ${def.label}`);
 
-			// Same export, from the same registry: the opencode file must list
-			// every provider OMP registered, not just the one that refreshed.
-			OPENCODE_REGISTRY.set(providerId, {
-				label: `${def.label} (verified)`,
-				baseUrl: def.baseUrl,
-				models,
-			});
-			writeOpencode();
 		})();
 	}
 }
@@ -813,32 +697,48 @@ function registerAdditionalProviders(pi: ExtensionAPI): void {
  * "no filtering available" rather than "nothing passed" — the two very
  * different cases must not collapse.
  */
-interface AuditDoc {
-	providers?: { id: string; models?: { id: string; state: string; detail?: string }[] }[];
+interface StableDoc {
+	generatedAt?: string;
+	rule?: string;
+	providers?: { id: string; models?: { id: string; status: string; reason?: string }[] }[];
 }
 
-function readAudit(): AuditDoc | null {
-	const path = join(MODULE_DIR, "..", "audit.json");
+function readStable(): StableDoc | null {
+	const path = join(MODULE_DIR, "..", "audit-stable.json");
 	if (!existsSync(path)) return null;
 	try {
-		return JSON.parse(readFileSync(path, "utf-8")) as AuditDoc;
+		return JSON.parse(readFileSync(path, "utf-8")) as StableDoc;
 	} catch {
 		return null;
 	}
 }
 
-function loadVerifiedIds(): Set<string> {
-	const audit = readAudit();
-	if (!audit) return new Set();
+/**
+ * Model ids eligible for a `verified-*` provider, keyed `<providerId>/<modelId>`.
+ *
+ * This reads the stability verdict rather than the last audit. A single pass
+ * cannot tell a working model from a lucky one: our own eval scored one model
+ * 100, 33 and 0 on three identical runs, and providers are no steadier. A model
+ * earns the `verified-` name by passing at least twice in the recent window.
+ *
+ * Returns null when there is no verdict yet, which callers treat as "no
+ * filtering available". An empty set means the verdict exists and nothing
+ * qualified. Collapsing those two is dangerous: right after a first run every
+ * model is "new", and reading that as "no filter" would register the entire
+ * free catalogue — the exact opposite of the rule.
+ */
+function loadVerifiedIds(): Set<string> | null {
+	const stable = readStable();
+	if (!stable) return null;
 	try {
 		const ids = new Set<string>();
-		for (const provider of audit.providers ?? []) {
+		for (const provider of stable.providers ?? []) {
 			for (const model of provider.models ?? []) {
-				// `ok` is the only state that means the model answered a tool
-				// call. `partial` answers chat but cannot call tools, and
-				// `throttled` is a capacity reading, not a verdict — neither
-				// belongs in a list whose promise is that every entry works.
-				if (model.state === "ok") ids.add(`${provider.id}/${model.id}`);
+				// `stable` means passed 2 of the last 3 runs. `unstable` failed,
+				// `new` has too little history, `retired` has stopped being
+				// offered — none of them belong in a list that promises every
+				// entry works.
+				if (model.status === "stable") ids.add(`${provider.id}/${model.id}`);
 			}
 		}
 		return ids;
