@@ -24,7 +24,19 @@ import type {
 	ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
 
-const PROVIDER_ID = "hermes-proxy";
+// The allowlist, catalog discovery, and mapping live in a plain-JS module so the
+// CLI audit scripts and this extension cannot drift apart.
+import {
+	fetchFreeModels as fetchProviderFreeModels,
+	loadDotEnv,
+	loadProviders as loadProviderDefs,
+	mapModel as mapProviderModel,
+	resolveKey as resolveProviderKey,
+} from "./providers.mjs";
+
+loadDotEnv();
+
+const PROVIDER_ID = "verified-hermes";
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 /** Package root: the extension lives in <root>/src, data files sit beside package.json. */
 const ROOT_DIR = join(MODULE_DIR, "..");
@@ -549,7 +561,7 @@ async function loadCatalog(config: HermesConfig, allowNetwork: boolean): Promise
 	if (cache && cache.catalog.length > 0) {
 		const selection = selectModels(cache.catalog, config);
 		if (selection.models.length >= config.minModelsToAccept) {
-			report(`hermes-proxy: using cache from ${cache.generatedAt} (${note ?? "no network"})`);
+			report(`verified-hermes: using cache from ${cache.generatedAt} (${note ?? "no network"})`);
 			return {
 				models: selection.models,
 				source: "cache",
@@ -565,10 +577,10 @@ async function loadCatalog(config: HermesConfig, allowNetwork: boolean): Promise
 	const seed = readSeed();
 	const seedSelection = selectModels(seed, config);
 	if (seedSelection.models.length === 0) {
-		report(`hermes-proxy: no models available (${note ?? "all sources empty"})`);
+		report(`verified-hermes: no models available (${note ?? "all sources empty"})`);
 		return { models: [], source: "seed", catalogTotal: 0, note };
 	}
-	report(`hermes-proxy: falling back to seed models.json (${note ?? "no network, no cache"})`);
+	report(`verified-hermes: falling back to seed models.json (${note ?? "no network, no cache"})`);
 	return { models: seedSelection.models, source: "seed", catalogTotal: seed.length, note };
 }
 
@@ -595,7 +607,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const result = await loadCatalog(config, true);
 		last = result;
 		if (result.models.length === 0) {
-			report("hermes-proxy: refresh produced no models, keeping previous list");
+			report("verified-hermes: refresh produced no models, keeping previous list");
 		}
 		return result.models;
 	}
@@ -606,7 +618,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	try {
 		initial = await refresh();
 	} catch (error) {
-		report(`hermes-proxy: initial load failed: ${errorMessage(error)}`);
+		report(`verified-hermes: initial load failed: ${errorMessage(error)}`);
 	}
 
 	pi.registerProvider(PROVIDER_ID, {
@@ -619,9 +631,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	});
 
 	pi.registerCommand("hermes-refresh", {
-		description: "Re-fetch the Hermes proxy catalog and re-register hermes-proxy models",
+		description: "Re-fetch the Hermes proxy catalog and re-register verified-hermes models",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
-			ctx.ui.notify("hermes-proxy: refreshing catalog...");
+			ctx.ui.notify("verified-hermes: refreshing catalog...");
 			const models = await refresh();
 			// After initial load these take effect immediately, no /reload needed.
 			pi.unregisterProvider(PROVIDER_ID);
@@ -641,11 +653,125 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// Refresh once the session is live so startup is not blocked by the probe pass.
 		void refresh();
 	});
+
+	registerAdditionalProviders(pi);
+}
+
+/**
+ * Register every enabled provider in the allowlist that the Hermes path does
+ * not already cover, as a `verified-<id>` provider.
+ *
+ * Two deliberate properties:
+ *
+ * 1. Only models the audit cleared are registered. OMP's picker otherwise shows
+ *    every model an upstream advertises, including ones that answer 402, 429,
+ *    or return nothing, so choosing a provider there means triaging 18
+ *    candidates to find the 13 that work. A `verified-*` list is short and every
+ *    entry works.
+ *
+ * 2. Providers stay separate rather than merged. Model ids collide across
+ *    upstreams — `stealth/space-bunny-alpha` is served by Hermes, Cline and
+ *    Kilo — and one merged provider cannot route three baseUrls with three
+ *    different credentials anyway.
+ */
+function registerAdditionalProviders(pi: ExtensionAPI): void {
+	const extra = loadProviderDefs().filter(
+		(def) => def.enabled !== false && def.id !== "hermes" && def.baseUrl,
+	);
+	if (extra.length === 0) return;
+
+	const verified = loadVerifiedIds();
+
+	for (const def of extra) {
+		const key = resolveProviderKey(def);
+		const providerId = `verified-${def.id}`;
+
+		const load = async (): Promise<ProviderModelConfig[]> => {
+			const catalog = await fetchProviderFreeModels(def as never);
+			const mapped = catalog.models
+				// When an audit exists it is the authority. Without one, fall back
+				// to the full free list rather than registering nothing, so a
+				// first run before the audit still gives a usable picker.
+				.filter((m) => verified.size === 0 || verified.has(`${def.id}/${String((m as { id?: string }).id)}`))
+				.map((model) => mapProviderModel(model as never, { maxContextWindow: 2_000_000 }))
+				.filter(Boolean) as unknown as ProviderModelConfig[];
+			return mapped;
+		};
+
+		void (async () => {
+			let models: ProviderModelConfig[] = [];
+			try {
+				models = await load();
+			} catch (error) {
+				report(`${providerId}: initial load failed: ${errorMessage(error)}`);
+			}
+			if (models.length === 0) {
+				report(`${providerId}: no verified models — run: node scripts/audit-models.mjs --provider ${def.id}`);
+				return;
+			}
+
+			pi.registerProvider(providerId, {
+				name: `${def.label} (verified)`,
+				baseUrl: def.baseUrl,
+				// OMP requires a non-empty apiKey for any provider that defines
+				// models. Cline and Kilo both authenticate, so this is the real
+				// token rather than a placeholder.
+				apiKey: key,
+				authHeader: true,
+				api: "openai-completions",
+				// The provider's own SDK-identity headers must ride along, or
+				// gated models answer 403 and look dead.
+				headers: { ...(def.headers ?? {}) },
+				models,
+				async refreshModels(context: { allowNetwork?: boolean; signal?: AbortSignal }) {
+					if (!context?.allowNetwork || context?.signal?.aborted) return models;
+					try {
+						models = await load();
+					} catch (error) {
+						report(`${providerId}: refresh failed: ${errorMessage(error)}`);
+					}
+					return models;
+				},
+			} as never);
+
+			report(`${providerId}: registered ${models.length} verified model(s) from ${def.label}`);
+		})();
+	}
+}
+
+/**
+ * Read the audit's passing model ids, keyed as `<providerId>/<modelId>`.
+ *
+ * Returns an empty set when no audit exists yet, which callers treat as
+ * "no filtering available" rather than "nothing passed" — the two very
+ * different cases must not collapse.
+ */
+function loadVerifiedIds(): Set<string> {
+	const path = join(MODULE_DIR, "..", "audit.json");
+	if (!existsSync(path)) return new Set();
+	try {
+		const audit = JSON.parse(readFileSync(path, "utf-8")) as {
+			providers?: { id: string; models?: { id: string; state: string }[] }[];
+		};
+		const ids = new Set<string>();
+		for (const provider of audit.providers ?? []) {
+			for (const model of provider.models ?? []) {
+				// `ok` is the only state that means the model answered a tool
+				// call. `partial` answers chat but cannot call tools, and
+				// `throttled` is a capacity reading, not a verdict — neither
+				// belongs in a list whose promise is that every entry works.
+				if (model.state === "ok") ids.add(`${provider.id}/${model.id}`);
+			}
+		}
+		return ids;
+	} catch {
+		return new Set();
+	}
 }
 
 function describe(result: LoadResult): string {
 	const lines = [
-		`hermes-proxy: ${result.models.length} model(s) from ${result.source}` +
+		`verified-hermes: ${result.models.length} model(s) from ${result.source}` +
 			(result.catalogTotal ? ` (catalog ${result.catalogTotal})` : ""),
 	];
 	if (result.generatedAt) lines.push(`  catalog written: ${result.generatedAt}`);

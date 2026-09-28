@@ -21,15 +21,33 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const URL_BASE = (process.env.HERMES_PROXY_URL ?? "http://localhost:8645/v1").replace(/\/$/, "");
-const KEY = process.env.HERMES_PROXY_KEY ?? "HermesProxyLocal";
+import {
+	buildHeaders,
+	fetchFreeModels,
+	isFreeModel,
+	loadDotEnv,
+	loadProviders,
+	unwrapCompletion,
+} from "../src/providers.mjs";
+
 const REPO = new URL("..", import.meta.url).pathname;
+loadDotEnv();
 
 // Generous by default. Several models burn their whole budget on reasoning
-// before emitting anything, and that is itself a finding worth recording.
-const MAX_TOKENS = Number(process.env.EVAL_MAX_TOKENS ?? 4000);
+// before emitting anything, and that is itself a finding worth recording —
+// but too tight a budget reads as a failure rather than as a slow thinker.
+const MAX_TOKENS = Number(process.env.EVAL_MAX_TOKENS ?? 6000);
 const TIMEOUT_MS = Number(process.env.EVAL_TIMEOUT_MS ?? 280000);
+
+/** Gap between models. Five tests per model already spends a provider's budget. */
+const DEFAULT_DELAY_MS = 2500;
+
+/** The provider under evaluation. Set from --provider. */
+let currentDef = null;
 
 // ---------------------------------------------------------------------------
 // tests
@@ -84,6 +102,8 @@ const DURATION_CASES = [
 // ---------------------------------------------------------------------------
 
 async function call(model, body) {
+	const def = currentDef;
+	if (!def) throw new Error("no provider selected — pass --provider <id>");
 	const payload = {
 		model,
 		messages: [{ role: "user", content: body.content }],
@@ -98,12 +118,12 @@ async function call(model, body) {
 
 	const started = Date.now();
 	try {
-		const res = await fetch(`${URL_BASE}/chat/completions`, {
+		const res = await fetch(`${def.baseUrl}/chat/completions`, {
 			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${KEY}`,
-			},
+			// buildHeaders supplies the provider's SDK-identity headers. Cline
+			// 403s every cline-free model without them, which would otherwise
+			// score as a dead model rather than a misconfigured request.
+			headers: buildHeaders(def, { "Content-Type": "application/json" }),
 			body: JSON.stringify(payload),
 			signal: AbortSignal.timeout(TIMEOUT_MS),
 		});
@@ -112,11 +132,15 @@ async function call(model, body) {
 			let detail = text.slice(0, 160);
 			try {
 				const parsed = JSON.parse(text);
-				detail = `${parsed.message ?? text}`.slice(0, 160);
+				detail = `${parsed.message ?? parsed.error?.message ?? text}`.slice(0, 160);
 			} catch {}
 			return { ok: false, status: res.status, error: detail, seconds: (Date.now() - started) / 1000 };
 		}
-		const json = JSON.parse(text);
+		const parsedJson = JSON.parse(text);
+		// Some gateways nest the OpenAI shape under `data`. Reading the wrong
+		// level yields no content and scores a working model as failing every
+		// test, so unwrap through the shared helper.
+		const json = unwrapCompletion(parsedJson) ?? {};
 		const choice = (json.choices ?? [])[0] ?? {};
 		const message = choice.message ?? {};
 		return {
@@ -129,14 +153,21 @@ async function call(model, body) {
 			seconds: (Date.now() - started) / 1000,
 		};
 	} catch (error) {
-		return { ok: false, status: 0, error: String(error).slice(0, 160), seconds: (Date.now() - started) / 1000 };
+		const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
+		return {
+			ok: false,
+			status: 0,
+			error: timedOut ? `timeout after ${TIMEOUT_MS}ms` : String(error).slice(0, 160),
+			seconds: (Date.now() - started) / 1000,
+		};
 	}
 }
 
-async function catalog() {
-	const res = await fetch(`${URL_BASE}/models`, { headers: { Authorization: `Bearer ${KEY}` } });
+async function catalog(def) {
+	const res = await fetch(`${def.baseUrl}/models`, { headers: buildHeaders(def) });
 	if (!res.ok) throw new Error(`catalog fetch failed: ${res.status}`);
-	return (await res.json()).data ?? [];
+	const body = await res.json();
+	return (unwrapCompletion(body) ?? body).data ?? [];
 }
 
 // ---------------------------------------------------------------------------
@@ -256,23 +287,31 @@ async function evaluate(model) {
 				seconds: reasoning.seconds,
 			}
 		: { pass: 0, ok: false, error: reasoning.error, status: reasoning.status, seconds: reasoning.seconds };
-
-	const instruction = await call(model, { content: T_IF, max_tokens: 1200 });
+	// Generous budgets: a reasoning model given a tight budget can spend all of
+	// it thinking and return finish_reason "length" with no content, which
+	// scores as a failed test rather than as a slow one.
+	const instruction = await call(model, { content: T_IF, max_tokens: 2500 });
 	results.instruction = instruction.ok
 		? { ...scoreInstructionFollowing(instruction.content), ok: true, seconds: instruction.seconds }
 		: { pass: 0, ok: false, error: instruction.error, status: instruction.status, seconds: instruction.seconds };
 
-	const tools = await call(model, { content: T_TOOL, max_tokens: 1500, tools: TOOLS });
+	const tools = await call(model, { content: T_TOOL, max_tokens: 3000, tools: TOOLS });
 	results.tools = tools.ok
 		? { ...scoreToolUse(tools), ok: true, seconds: tools.seconds }
 		: { pass: 0, ok: false, error: tools.error, status: tools.status, seconds: tools.seconds };
 
-	const trivial = await call(model, { content: T_TRIV, max_tokens: 1500 });
+	const trivial = await call(model, { content: T_TRIV, max_tokens: 2500 });
 	results.trivial = trivial.ok
 		? { ...scoreTrivial(trivial.content), ok: true, seconds: trivial.seconds }
 		: { pass: 0, ok: false, error: trivial.error, status: trivial.status, seconds: trivial.seconds };
 
-	const total = Object.entries(WEIGHTS).reduce((sum, [k, w]) => sum + (results[k]?.pass ?? 0) * w, 0) / 100;
+	// Percentage 0-100. Dividing by 100 here would put the total on a 0-1
+	// scale, which `toFixed(0)` then prints as "0" or "1" for every model —
+	// the score column becomes meaningless.
+	const total = Object.entries(WEIGHTS).reduce(
+		(sum, [k, w]) => sum + (results[k]?.pass ?? 0) * w,
+		0,
+	);
 	const failed = Object.values(results).find((r) => !r.ok);
 
 	return { model, total, results, status: failed?.status ?? 0, hardError: failed?.error ?? null };
@@ -331,42 +370,77 @@ const argv = process.argv.slice(2);
 const explicit = [];
 let all = false;
 let jsonOut = null;
+let providerId = "hermes";
+let fromAudit = false;
+let delayMs = DEFAULT_DELAY_MS;
 
 for (let i = 0; i < argv.length; i += 1) {
 	if (argv[i] === "--model") explicit.push(argv[++i]);
 	else if (argv[i] === "--all") all = true;
 	else if (argv[i] === "--json") jsonOut = argv[++i];
+	else if (argv[i] === "--provider") providerId = argv[++i];
+	else if (argv[i] === "--from-audit") fromAudit = true;
+	else if (argv[i] === "--delay") delayMs = Number(argv[++i]);
 	else if (argv[i] === "--help" || argv[i] === "-h") {
+		const defs = loadProviders();
 		console.log(
 			[
-				"eval-models — smoke-eval models through the local Hermes proxy",
+				"eval-models — quality smoke-eval across configured providers",
 				"",
-				"  node scripts/eval-models.mjs",
-				"  node scripts/eval-models.mjs --model <id> --model <id>",
-				"  node scripts/eval-models.mjs --all        # every model in the catalog",
-				"  node scripts/eval-models.mjs --json out.json",
+				"  node scripts/eval-models.mjs --provider hermes",
+				"  node scripts/eval-models.mjs --provider cline",
+				"  node scripts/eval-models.mjs --provider kilo",
+				"  node scripts/eval-models.mjs --provider kilo --from-audit",
+				"  node scripts/eval-models.mjs --provider hermes --model <id> --model <id>",
+				"  node scripts/eval-models.mjs --provider hermes --all   # whole catalog, not just free",
+				"  node scripts/eval-models.mjs --provider hermes --json eval.json",
+				"  node scripts/eval-models.mjs --delay 4000            # gentler on rate limits",
 				"",
-				`  HERMES_PROXY_URL  default ${URL_BASE}`,
-				`  HERMES_PROXY_KEY  default ${KEY}`,
+				`  providers in providers.json: ${defs.map((d) => d.id).join(", ")}`,
 				`  EVAL_MAX_TOKENS   default ${MAX_TOKENS}`,
+				`  EVAL_TIMEOUT_MS   default ${TIMEOUT_MS}`,
+				`  default pacing   ${DEFAULT_DELAY_MS}ms between models`,
 			].join("\n"),
 		);
 		process.exit(0);
 	}
 }
 
-const free = (m) => {
-	const p = m.pricing ?? {};
-	const zero = Number(p.prompt ?? -1) === 0 && Number(p.completion ?? -1) === 0;
-	return m.id.includes(":free") || zero;
-};
+const defs = loadProviders();
+currentDef = defs.find((d) => d.id === providerId);
+if (!currentDef) {
+	console.error(`unknown provider "${providerId}". known: ${defs.map((d) => d.id).join(", ")}`);
+	process.exit(1);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Models the audit cleared, as ids. Empty when no audit exists. */
+function auditPassed() {
+	const path = join(REPO, "audit.json");
+	if (!existsSync(path)) return new Set();
+	const audit = JSON.parse(readFileSync(path, "utf-8"));
+	const set = new Set();
+	for (const p of audit.providers ?? []) {
+		if (p.id !== providerId) continue;
+		for (const m of p.models ?? []) if (m.state === "ok") set.add(m.id);
+	}
+	return set;
+}
 
 let models;
 if (explicit.length > 0) {
 	models = explicit.map((id) => ({ id }));
+} else if (fromAudit) {
+	const passed = auditPassed();
+	if (passed.size === 0) {
+		console.error("--from-audit needs audit.json with passing models. Run: node scripts/audit-models.mjs");
+		process.exit(1);
+	}
+	models = [...passed].map((id) => ({ id }));
 } else {
-	const all_models = await catalog();
-	models = all ? all_models : all_models.filter(free);
+	const allModels = await catalog(currentDef);
+	models = all ? allModels : allModels.filter(isFreeModel);
 }
 
 if (models.length === 0) {
@@ -374,17 +448,22 @@ if (models.length === 0) {
 	process.exit(1);
 }
 
-console.log(`evaluating ${models.length} model(s) against ${URL_BASE}`);
+console.log(`evaluating ${models.length} model(s) on ${currentDef.id} — ${currentDef.baseUrl}`);
 console.log(`weights: ${Object.entries(WEIGHTS).map(([k, v]) => `${k} ${v}`).join(", ")}`);
 
 const rows = [];
 for (const m of models) {
 	process.stderr.write(`  ${m.id} ...`);
 	const row = await evaluate(m.id);
+	row.provider = currentDef.id;
 	rows.push(row);
 	process.stderr.write(
 		row.status === 404 ? " DEAD\n" : row.status === 429 ? " 429\n" : ` ${row.total.toFixed(0)}\n`,
 	);
+	// Serial and spaced. Five tests per model already keeps a provider under
+	// its rate limit; back to back models with no gap is what produces
+	// throttle noise indistinguishable from a quality result.
+	await sleep(delayMs);
 }
 
 rows.sort((a, b) => b.total - a.total);
@@ -395,7 +474,11 @@ if (jsonOut) {
 	const target = jsonOut.startsWith("/") ? jsonOut : `${REPO}${jsonOut}`;
 	await fs.writeFile(
 		target,
-		JSON.stringify({ generatedAt: new Date().toISOString(), baseUrl: URL_BASE, weights: WEIGHTS, rows }, null, 2),
+		JSON.stringify(
+			{ generatedAt: new Date().toISOString(), provider: currentDef.id, baseUrl: currentDef.baseUrl, weights: WEIGHTS, rows },
+			null,
+			2,
+		),
 	);
 	console.log(`\nwrote ${target}`);
 }
